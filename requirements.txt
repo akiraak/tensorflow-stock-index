@@ -1,0 +1,8 @@
+numpy==1.11.0
+pandas==0.18.1
+protobuf==3.0.0b2
+python-dateutil==2.5.3
+pytz==2016.4
+six==1.10.0
+wheel==0.29.0
+wsgiref==0.1.2
