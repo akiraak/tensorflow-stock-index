@@ -18,12 +18,12 @@ import tensorflow as tf
 DAYS_BACK = 3
 FROM_YEAR = '1991'
 EXCHANGES_DEFINE = [
-    ['DOW', '^DJI'],
+    #['DOW', '^DJI'],
     ['FTSE', '^FTSE'],
     ['GDAXI', '^GDAXI'],
     ['HSI', '^HSI'],
     ['N225', '^N225'],
-    ['NASDAQ', '^IXIC'],
+    #['NASDAQ', '^IXIC'],
     ['SP500', '^GSPC'],
     ['SSEC', '000001.SS'],
 ]
