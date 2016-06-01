@@ -16,6 +16,7 @@ import tensorflow as tf
 
 
 DAYS_BACK = 3
+REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
 FROM_YEAR = '1991'
 EXCHANGES_DEFINE = [
     #['DOW', '^DJI'],
@@ -28,6 +29,7 @@ EXCHANGES_DEFINE = [
     ['SSEC', '000001.SS'],
 ]
 EXCHANGES_LABEL = [exchange[0] for exchange in EXCHANGES_DEFINE]
+
 
 Dataset = namedtuple(
     'Dataset',
@@ -69,14 +71,25 @@ def fetchStockIndexes():
         fetchYahooFinance(exchange[0], exchange[1])
 
 
-def load_exchange_dataframes():
+def load_exchange_dataframes(target_exchange):
     '''EXCHANGESに対応するCSVファイルをPandasのDataFrameとして読み込む。
 
     Returns:
         {EXCHANGES[n]: pd.DataFrame()}
     '''
-    return {exchange: load_exchange_dataframe(exchange)
+
+    datas = {exchange: load_exchange_dataframe(exchange)
             for exchange in EXCHANGES_LABEL}
+
+    # 計算対象の日付に存在しないデータを削除する
+    if REMOVE_NIL_DATE:
+        target_indexes = datas[target_exchange].index
+        for (exchange, data) in datas.items():
+            for index in data.index:
+                if not index in target_indexes:
+                    datas[exchange] = datas[exchange].drop(index)
+
+    return datas
 
 
 def load_exchange_dataframe(exchange):
@@ -135,6 +148,7 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
     Returns:
         pd.DataFrame()
     '''
+
     # 「上がる」「下がる」の結果を計算
     columns = []
     for colname, exchange, operator in iter_categories(target_exchange):
@@ -448,7 +462,7 @@ def main(args):
     print('株価指標データをダウンロードしcsvファイルに保存')
     fetchStockIndexes()
     print('株価指標データを読み込む')
-    all_data  = load_exchange_dataframes()
+    all_data  = load_exchange_dataframes(args.target_exchange)
     print('終値を取得')
     closing_data = get_closing_data(all_data)
     print('データを学習に使える形式に正規化')
