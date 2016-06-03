@@ -16,18 +16,20 @@ import tensorflow as tf
 
 
 DAYS_BACK = 3
+REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
 FROM_YEAR = '1991'
 EXCHANGES_DEFINE = [
-    ['DOW', '^DJI'],
+    #['DOW', '^DJI'],
     ['FTSE', '^FTSE'],
     ['GDAXI', '^GDAXI'],
     ['HSI', '^HSI'],
     ['N225', '^N225'],
-    ['NASDAQ', '^IXIC'],
+    #['NASDAQ', '^IXIC'],
     ['SP500', '^GSPC'],
     ['SSEC', '000001.SS'],
 ]
 EXCHANGES_LABEL = [exchange[0] for exchange in EXCHANGES_DEFINE]
+
 
 Dataset = namedtuple(
     'Dataset',
@@ -69,14 +71,25 @@ def fetchStockIndexes():
         fetchYahooFinance(exchange[0], exchange[1])
 
 
-def load_exchange_dataframes():
+def load_exchange_dataframes(target_exchange):
     '''EXCHANGESに対応するCSVファイルをPandasのDataFrameとして読み込む。
 
     Returns:
         {EXCHANGES[n]: pd.DataFrame()}
     '''
-    return {exchange: load_exchange_dataframe(exchange)
+
+    datas = {exchange: load_exchange_dataframe(exchange)
             for exchange in EXCHANGES_LABEL}
+
+    # 計算対象の日付に存在しないデータを削除する
+    if REMOVE_NIL_DATE:
+        target_indexes = datas[target_exchange].index
+        for (exchange, data) in datas.items():
+            for index in data.index:
+                if not index in target_indexes:
+                    datas[exchange] = datas[exchange].drop(index)
+
+    return datas
 
 
 def load_exchange_dataframe(exchange):
@@ -90,35 +103,40 @@ def load_exchange_dataframe(exchange):
     return pd.read_csv('index_{}.csv'.format(exchange)).set_index('Date').sort_index()
 
 
-def get_closing_data(dataframes):
-    '''各指標の終値カラムをまとめて1つのDataFrameに詰める。
+def get_using_data(dataframes):
+    '''各指標の必要なカラムをまとめて1つのDataFrameに詰める。
 
     Args:
         dataframes: {key: pd.DataFrame()}
     Returns:
         pd.DataFrame()
     '''
-    closing_data = pd.DataFrame()
+    using_data = pd.DataFrame()
     for exchange, dataframe in dataframes.items():
-        closing_data[exchange] = dataframe['Close']
-    closing_data = closing_data.fillna(method='ffill')
-    return closing_data
+        using_data['{}_OPEN'.format(exchange)] = dataframe['Open']
+        using_data['{}_CLOSE'.format(exchange)] = dataframe['Close']
+    using_data = using_data.fillna(method='ffill')
+    return using_data
 
 
-def get_log_return_data(closing_data):
+def get_log_return_data(using_data):
     '''各指標について、終値を1日前との比率の対数をとって正規化する。
 
     Args:
-        closing_data: pd.DataFrame()
+        using_data: pd.DataFrame()
     Returns:
         pd.DataFrame()
     '''
 
     log_return_data = pd.DataFrame()
-    for exchange in closing_data:
+    for (exchange, _) in EXCHANGES_DEFINE:
+        open_column = '{}_OPEN'.format(exchange)
+        close_column = '{}_CLOSE'.format(exchange)
         # np.log(当日終値 / 前日終値) で前日からの変化率を算出
         # 前日よりも上がっていればプラス、下がっていればマイナスになる
-        log_return_data[exchange] = np.log(closing_data[exchange]/closing_data[exchange].shift())
+        log_return_data['{}_CLOSE_RATE'.format(exchange)] = np.log(using_data[close_column]/using_data[close_column].shift())
+        # 終値 >= 始値 なら1。それ意外は0
+        log_return_data['{}_RESULT'.format(exchange)] = map(int, using_data[close_column] >= using_data[open_column])
 
     return log_return_data
 
@@ -131,20 +149,21 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
         log_return_data: pd.DataFrame()
         target_exchange: 学習目標とする指標名
         max_days_back: 何日前までの終値を学習データに含めるか
+        # 終値 >= 始値 なら1。それ意外は0
         use_subset (float): 短時間で動作を確認したい時用: log_return_dataのうち一部だけを学習データに含める
     Returns:
         pd.DataFrame()
     '''
-    # 「上がる」「下がる」の結果を計算
-    columns = []
-    for colname, exchange, operator in iter_categories(target_exchange):
-        columns.append(colname)
-        # 全ての XXX_positive, XXX_negative を 0 に初期化
-        log_return_data[colname] = 0
-        # XXX_positive の場合は >=  0 の全てのインデックスを
-        # XXX_negative の場合は < 0 の全てのインデックスを取得し、それらに 1 を設定する
-        indices = operator(log_return_data[exchange], 0)
-        log_return_data.ix[indices, colname] = 1
+
+    columns = ['positive', 'negative']
+
+    # 「上がる」「下がる」の結果を
+    log_return_data['positive'] = 0
+    positive_indices = op.eq(log_return_data['{}_RESULT'.format(target_exchange)], 1)
+    log_return_data.ix[positive_indices, 'positive'] = 1
+    log_return_data['negative'] = 0
+    negative_indices = op.eq(log_return_data['{}_RESULT'.format(target_exchange)], 0)
+    log_return_data.ix[negative_indices, 'negative'] = 1
 
     num_categories = len(columns)
 
@@ -155,8 +174,8 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
     '''
     columns には計算対象の positive, negative と各指標の日数分のラベルが含まれる
     例：[
-        'SP500_positive',
-        'SP500_negative',
+        'positive',
+        'negative',
         'DOW_0',
         'DOW_1',
         'DOW_2',
@@ -186,7 +205,7 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
     '''
 
     # データ数をもとめる
-    max_index = len(log_return_data) - max_days_back
+    max_index = len(log_return_data)
     if use_subset is not None:
         # データを少なくしたいとき
         max_index = int(max_index * use_subset)
@@ -197,25 +216,14 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
         # 先頭のデータを含めるとなぜか上手くいかないので max_days_back + 10 で少し省く
         values = {}
         # 「上がる」「下がる」の答を入れる
-        for colname, _, _ in iter_categories(target_exchange):
-            values[colname] = log_return_data[colname].ix[i]
+        values['positive'] = log_return_data['positive'].ix[i]
+        values['negative'] = log_return_data['negative'].ix[i]
         # 学習データを入れる
         for colname, exchange, days_back in iter_exchange_days_back(target_exchange, max_days_back):
-            values[colname] = log_return_data[exchange].ix[i - days_back]
+            values[colname] = log_return_data['{}_CLOSE_RATE'.format(exchange)].ix[i - days_back]
         training_test_data = training_test_data.append(values, ignore_index=True)
 
     return num_categories, training_test_data
-
-
-def iter_categories(target_exchange):
-    '''分類クラス名とその値を計算するためのオペレーター関数を列挙する。
-    '''
-    for polarity, operator in [
-            ('positive', op.ge), # >=
-            ('negative', op.lt), # <
-    ]:
-        colname = '{}_{}'.format(target_exchange, polarity)
-        yield colname, target_exchange, operator
 
 
 def iter_exchange_days_back(target_exchange, max_days_back):
@@ -327,47 +335,6 @@ def tf_confusion_metrics(model, actual_classes, session, feed_dict):
     print('Accuracy = ', accuracy)
 
 
-def simple_network(dataset):
-    '''単純な分類モデルを返す。
-    '''
-    sess = tf.Session()
-
-    # Define variables for the number of predictors and number of classes to remove magic numbers from our code.
-    num_predictors = len(dataset.training_predictors.columns)
-    num_classes = len(dataset.training_classes.columns)
-
-    # Define placeholders for the data we feed into the process - feature data and actual classes.
-    feature_data = tf.placeholder("float", [None, num_predictors])
-    actual_classes = tf.placeholder("float", [None, num_classes])
-
-    # Define a matrix of weights and initialize it with some small random values.
-    weights = tf.Variable(tf.truncated_normal([num_predictors, num_classes], stddev=0.0001))
-    biases = tf.Variable(tf.ones([num_classes]))
-
-    # Define our model...
-    # Here we take a softmax regression of the product of our feature data and weights.
-    model = tf.nn.softmax(tf.matmul(feature_data, weights) + biases)
-
-    # Define a cost function (we're using the cross entropy).
-    cost = -tf.reduce_sum(actual_classes * tf.log(model))
-
-    # Define a training step...
-    # Here we use gradient descent with a learning rate of 0.01 using the cost function we just defined.
-    training_step = tf.train.AdamOptimizer(learning_rate=0.0001).minimize(cost)
-
-    init = tf.initialize_all_variables()
-    sess.run(init)
-
-    return Environ(
-        sess=sess,
-        model=model,
-        actual_classes=actual_classes,
-        training_step=training_step,
-        dataset=dataset,
-        feature_data=feature_data,
-    )
-
-
 def smarter_network(dataset):
     '''隠しレイヤー入りのもうちょっと複雑な分類モデルを返す。
     '''
@@ -448,11 +415,11 @@ def main(args):
     print('株価指標データをダウンロードしcsvファイルに保存')
     fetchStockIndexes()
     print('株価指標データを読み込む')
-    all_data  = load_exchange_dataframes()
+    all_data  = load_exchange_dataframes(args.target_exchange)
     print('終値を取得')
-    closing_data = get_closing_data(all_data)
+    using_data = get_using_data(all_data)
     print('データを学習に使える形式に正規化')
-    log_return_data = get_log_return_data(closing_data)
+    log_return_data = get_log_return_data(using_data)
     print('答と学習データを作る')
     num_categories, training_test_data = build_training_data(
         log_return_data, args.target_exchange,
@@ -461,7 +428,6 @@ def main(args):
     dataset = split_training_test_data(num_categories, training_test_data)
 
     print('器械学習のネットワークを作成')
-    #env = simple_network(dataset)
     env = smarter_network(dataset)
 
     if args.inspect:
