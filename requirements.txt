@@ -1,3 +1,4 @@
+lxml==3.6.0
 numpy==1.11.0
 pandas==0.18.1
 protobuf==3.0.0b2

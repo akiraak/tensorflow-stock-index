@@ -7,29 +7,44 @@ from __future__ import print_function
 
 import datetime
 import urllib2
+import math
 from os import path
 import operator as op
 from collections import namedtuple
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+from download import YahooCom, YahooJp
+from nikkei225 import nikkei225, brand_name
 
 
 DAYS_BACK = 3
 REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
-FROM_YEAR = '1991'
-EXCHANGES_DEFINE = [
-    #['DOW', '^DJI'],
-    ['FTSE', '^FTSE'],
-    ['GDAXI', '^GDAXI'],
-    ['HSI', '^HSI'],
-    ['N225', '^N225'],
-    #['NASDAQ', '^IXIC'],
-    ['SP500', '^GSPC'],
-    ['SSEC', '000001.SS'],
-]
-EXCHANGES_LABEL = [exchange[0] for exchange in EXCHANGES_DEFINE]
 
+
+# 銘柄情報の入れ物
+class Stock(object):
+    def __init__(self, downloadClass, code):
+        self.downloadClass = downloadClass
+        self.code = code
+
+    @property
+    def dataframe(self):
+        return self.downloadClass(self.code).dataframe
+
+
+# 株価指標
+stocks_base = {
+    #'DOW': Stock(YahooCom, '^DJI'),
+    'FTSE': Stock(YahooCom, '^FTSE'),
+    'GDAXI': Stock(YahooCom, '^GDAXI'),
+    'HSI': Stock(YahooCom, '^HSI'),
+    'N225': Stock(YahooCom, '^N225'),
+    #'NASDAQ': Stock(YahooCom, '^IXIC'),
+    'SP500': Stock(YahooCom, '^GSPC'),
+    'SSEC': Stock(YahooCom, '000001.SS'),
+}
+stocks = stocks_base
 
 Dataset = namedtuple(
     'Dataset',
@@ -37,53 +52,21 @@ Dataset = namedtuple(
 Environ = namedtuple('Environ', 'sess model actual_classes training_step dataset feature_data')
 
 
-def setupDateURL(urlBase):
-    now = datetime.date.today()
-    return urlBase.replace('__FROM_YEAR__', FROM_YEAR)\
-            .replace('__TO_MONTH__', str(now.month - 1))\
-            .replace('__TO_DAY__', str(now.day))\
-            .replace('__TO_YEAR__', str(now.year))
-
-
-def fetchCSV(fileName, url):
-    if path.isfile(fileName):
-        print('fetch CSV for local: ' + fileName)
-        with open(fileName) as f:
-            return f.read()
-    else:
-        print('fetch CSV for url: ' + url)
-        csv = urllib2.urlopen(url).read()
-        with open(fileName, 'w') as f:
-            f.write(csv)
-        return csv
-
-
-def fetchYahooFinance(name, code):
-    fileName = 'index_%s.csv' % name
-    url = setupDateURL('http://chart.finance.yahoo.com/table.csv?s=%s&a=0&b=1&c=__FROM_YEAR__&d=__TO_MONTH__&e=__TO_DAY__&f=__TO_YEAR__&g=d&ignore=.csv' % code)
-    csv = fetchCSV(fileName, url)
-
-
-def fetchStockIndexes():
-    '''株価指標のデータをダウンロードしファイルに保存
-    '''
-    for exchange in EXCHANGES_DEFINE:
-        fetchYahooFinance(exchange[0], exchange[1])
-
-
-def load_exchange_dataframes(target_exchange):
+def load_exchange_dataframes(target_brand):
     '''EXCHANGESに対応するCSVファイルをPandasのDataFrameとして読み込む。
 
     Returns:
         {EXCHANGES[n]: pd.DataFrame()}
     '''
 
-    datas = {exchange: load_exchange_dataframe(exchange)
-            for exchange in EXCHANGES_LABEL}
+    # 株価を読み込む
+    datas = {}
+    for (name, stock) in stocks.items():
+        datas[name] = stock.dataframe
 
     # 計算対象の日付に存在しないデータを削除する
     if REMOVE_NIL_DATE:
-        target_indexes = datas[target_exchange].index
+        target_indexes = datas[target_brand].index
         for (exchange, data) in datas.items():
             for index in data.index:
                 if not index in target_indexes:
@@ -129,25 +112,26 @@ def get_log_return_data(using_data):
     '''
 
     log_return_data = pd.DataFrame()
-    for (exchange, _) in EXCHANGES_DEFINE:
-        open_column = '{}_OPEN'.format(exchange)
-        close_column = '{}_CLOSE'.format(exchange)
+    #for (exchange, _) in EXCHANGES_DEFINE:
+    for (name, stock) in stocks.items():
+        open_column = '{}_OPEN'.format(name)
+        close_column = '{}_CLOSE'.format(name)
         # np.log(当日終値 / 前日終値) で前日からの変化率を算出
         # 前日よりも上がっていればプラス、下がっていればマイナスになる
-        log_return_data['{}_CLOSE_RATE'.format(exchange)] = np.log(using_data[close_column]/using_data[close_column].shift())
+        log_return_data['{}_CLOSE_RATE'.format(name)] = np.log(using_data[close_column]/using_data[close_column].shift())
         # 終値 >= 始値 なら1。それ意外は0
-        log_return_data['{}_RESULT'.format(exchange)] = map(int, using_data[close_column] >= using_data[open_column])
+        log_return_data['{}_RESULT'.format(name)] = map(int, using_data[close_column] >= using_data[open_column])
 
     return log_return_data
 
 
-def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BACK, use_subset=None):
-    '''学習データを作る。分類クラスは、target_exchange指標の終値が前日に比べて上ったか下がったかの2つである。
+def build_training_data(log_return_data, target_brand, max_days_back=DAYS_BACK, use_subset=None):
+    '''学習データを作る。分類クラスは、target_brandの終値が前日に比べて上ったか下がったかの2つである。
     また全指標の終値の、当日から数えてmax_days_back日前までを含めて入力データとする。
 
     Args:
         log_return_data: pd.DataFrame()
-        target_exchange: 学習目標とする指標名
+        target_exchange: 学習目標とする銘柄
         max_days_back: 何日前までの終値を学習データに含めるか
         # 終値 >= 始値 なら1。それ意外は0
         use_subset (float): 短時間で動作を確認したい時用: log_return_dataのうち一部だけを学習データに含める
@@ -159,16 +143,16 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
 
     # 「上がる」「下がる」の結果を
     log_return_data['positive'] = 0
-    positive_indices = op.eq(log_return_data['{}_RESULT'.format(target_exchange)], 1)
+    positive_indices = op.eq(log_return_data['{}_RESULT'.format(target_brand)], 1)
     log_return_data.ix[positive_indices, 'positive'] = 1
     log_return_data['negative'] = 0
-    negative_indices = op.eq(log_return_data['{}_RESULT'.format(target_exchange)], 0)
+    negative_indices = op.eq(log_return_data['{}_RESULT'.format(target_brand)], 0)
     log_return_data.ix[negative_indices, 'negative'] = 1
 
     num_categories = len(columns)
 
     # 各指標のカラム名を追加
-    for colname, _, _ in iter_exchange_days_back(target_exchange, max_days_back):
+    for colname, _, _ in iter_exchange_days_back(target_brand, max_days_back):
         columns.append(colname)
 
     '''
@@ -219,20 +203,21 @@ def build_training_data(log_return_data, target_exchange, max_days_back=DAYS_BAC
         values['positive'] = log_return_data['positive'].ix[i]
         values['negative'] = log_return_data['negative'].ix[i]
         # 学習データを入れる
-        for colname, exchange, days_back in iter_exchange_days_back(target_exchange, max_days_back):
+        for colname, exchange, days_back in iter_exchange_days_back(target_brand, max_days_back):
             values[colname] = log_return_data['{}_CLOSE_RATE'.format(exchange)].ix[i - days_back]
         training_test_data = training_test_data.append(values, ignore_index=True)
 
     return num_categories, training_test_data
 
 
-def iter_exchange_days_back(target_exchange, max_days_back):
+def iter_exchange_days_back(target_brand, max_days_back):
     '''指標名、何日前のデータを読むか、カラム名を列挙する。
     '''
-    for exchange in EXCHANGES_LABEL:
+    #for exchange in EXCHANGES_LABEL:
+    for (exchange, _) in stocks.items():
         # SP500 の結果を予測するのに SP500 の当日の値が含まれてはいけないので１日づらす
-        start_days_back = 1 if exchange == target_exchange else 0
-        #start_days_back = 1 # N225 で行う場合は全て前日の指標を使うようにする
+        #start_days_back = 1 if exchange == target_brand else 0
+        start_days_back = 1 # N225 で行う場合は全て前日の指標を使うようにする
         end_days_back = start_days_back + max_days_back
         for days_back in range(start_days_back, end_days_back):
             colname = '{}_{}'.format(exchange, days_back)
@@ -329,10 +314,12 @@ def tf_confusion_metrics(model, actual_classes, session, feed_dict):
         precision = 0
         f1_score = 0
 
-    print('Precision = ', precision)
-    print('Recall = ', recall)
-    print('F1 Score = ', f1_score)
-    print('Accuracy = ', accuracy)
+    return {
+        'Precision': precision,
+        'Recall': recall,
+        'F1 Score': f1_score,
+        'Accuracy': accuracy
+    }
 
 
 def smarter_network(dataset):
@@ -346,7 +333,7 @@ def smarter_network(dataset):
     feature_data = tf.placeholder("float", [None, num_predictors])
     actual_classes = tf.placeholder("float", [None, num_classes])
 
-    weights1 = tf.Variable(tf.truncated_normal([(DAYS_BACK * len(EXCHANGES_DEFINE)), 50], stddev=0.0001))
+    weights1 = tf.Variable(tf.truncated_normal([(DAYS_BACK * len(stocks)), 50], stddev=0.0001))
     biases1 = tf.Variable(tf.ones([50]))
 
     weights2 = tf.Variable(tf.truncated_normal([50, 25], stddev=0.0001))
@@ -385,18 +372,31 @@ def train(env, steps=30000, checkin_interval=5000):
         tf.argmax(env.actual_classes, 1))
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
+    bestResult = None
     for i in range(1, 1 + steps):
         env.sess.run(
             env.training_step,
             feed_dict=feed_dict(env, test=False),
         )
         if i % checkin_interval == 0:
+            """
             print(i, env.sess.run(
                 accuracy,
                 feed_dict=feed_dict(env, test=False),
             ))
+            """
+            result = tf_confusion_metrics(env.model, env.actual_classes, env.sess, feed_dict(env, True))
+            if not bestResult:
+                bestResult = result
+            else:
+                bast = math.fabs(bestResult['Accuracy'] - 0.5)
+                now = math.fabs(result['Accuracy'] - 0.5)
+                print(bast, now)
+                if bast < now:
+                    bestResult = result
 
-    tf_confusion_metrics(env.model, env.actual_classes, env.sess, feed_dict(env, True))
+    #bestResult = tf_confusion_metrics(env.model, env.actual_classes, env.sess, feed_dict(env, True))
+    return bestResult
 
 
 def feed_dict(env, test=False):
@@ -412,22 +412,22 @@ def feed_dict(env, test=False):
 
 
 def main(args):
-    print('株価指標データをダウンロードしcsvファイルに保存')
-    fetchStockIndexes()
-    print('株価指標データを読み込む')
-    all_data  = load_exchange_dataframes(args.target_exchange)
-    print('終値を取得')
+    #print('株価指標データをダウンロードしcsvファイルに保存')
+    #fetchStockIndexes()
+    #print('株価指標データを読み込む')
+    all_data  = load_exchange_dataframes(args.target_brand)
+    #print('終値を取得')
     using_data = get_using_data(all_data)
-    print('データを学習に使える形式に正規化')
+    #print('データを学習に使える形式に正規化')
     log_return_data = get_log_return_data(using_data)
-    print('答と学習データを作る')
+    #print('答と学習データを作る')
     num_categories, training_test_data = build_training_data(
-        log_return_data, args.target_exchange,
+        log_return_data, args.target_brand,
         use_subset=args.use_subset)
-    print('学習データをトレーニング用とテスト用に分割する')
+    #print('学習データをトレーニング用とテスト用に分割する')
     dataset = split_training_test_data(num_categories, training_test_data)
 
-    print('器械学習のネットワークを作成')
+    #print('器械学習のネットワークを作成')
     env = smarter_network(dataset)
 
     if args.inspect:
@@ -435,14 +435,15 @@ def main(args):
         print('Press Ctrl-d to proceed')
         code.interact(local=locals())
 
-    print('学習')
-    train(env, steps=args.steps, checkin_interval=args.checkin)
+    #print('学習')
+    return train(env, steps=args.steps, checkin_interval=args.checkin)
 
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('target_exchange', choices=EXCHANGES_LABEL)
+    #parser.add_argument('target_brand', choices=[name for (name, stock) in stocks.items()])
+    parser.add_argument('target_brand')
     parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--checkin', type=int, default=1000)
     parser.add_argument('--use-subset', type=float, default=None)
@@ -450,4 +451,10 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    main(args)
+    stocks[args.target_brand] = Stock(YahooJp, args.target_brand)
+    result = main(args)
+    target_brand_name = brand_name(args.target_brand)
+    print(u'[{}]{}: {}'.format(args.target_brand, target_brand_name, result['Accuracy']))
+
+    with open('results.csv', 'a') as f:
+        f.write(u'{},{},{}\n'.format(args.target_brand, target_brand_name, str(result['Accuracy'])).encode('shift-jis'))
