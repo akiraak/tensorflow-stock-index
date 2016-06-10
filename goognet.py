@@ -14,8 +14,9 @@ from collections import namedtuple
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+import argparse
 from download import YahooCom, YahooJp
-from nikkei225 import nikkei225, brand_name
+from brands import brand_name
 
 
 DAYS_BACK = 3
@@ -35,12 +36,12 @@ class Stock(object):
 
 # 株価指標
 stocks_base = {
-    #'DOW': Stock(YahooCom, '^DJI'),
+    'DOW': Stock(YahooCom, '^DJI'),
     'FTSE': Stock(YahooCom, '^FTSE'),
     'GDAXI': Stock(YahooCom, '^GDAXI'),
     'HSI': Stock(YahooCom, '^HSI'),
     'N225': Stock(YahooCom, '^N225'),
-    #'NASDAQ': Stock(YahooCom, '^IXIC'),
+    'NASDAQ': Stock(YahooCom, '^IXIC'),
     'SP500': Stock(YahooCom, '^GSPC'),
     'SSEC': Stock(YahooCom, '000001.SS'),
 }
@@ -309,7 +310,10 @@ def tf_confusion_metrics(model, actual_classes, session, feed_dict):
     recall = tpr
     if (float(tp) + float(fp)):
         precision = float(tp)/(float(tp) + float(fp))
-        f1_score = (2 * (precision * recall)) / (precision + recall)
+        if (precision + recall) != 0:
+            f1_score = (2 * (precision * recall)) / (precision + recall)
+        else:
+            f1_score = 0
     else:
         precision = 0
         f1_score = 0
@@ -440,9 +444,7 @@ def main(args):
 
 
 if __name__ == '__main__':
-    import argparse
     parser = argparse.ArgumentParser()
-    #parser.add_argument('target_brand', choices=[name for (name, stock) in stocks.items()])
     parser.add_argument('target_brand')
     parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--checkin', type=int, default=1000)
@@ -454,7 +456,7 @@ if __name__ == '__main__':
     stocks[args.target_brand] = Stock(YahooJp, args.target_brand)
     result = main(args)
     target_brand_name = brand_name(args.target_brand)
-    print(u'[{}]{}: {}'.format(args.target_brand, target_brand_name, result['Accuracy']))
+    print('[{}]{}: {}'.format(args.target_brand, target_brand_name, result['Accuracy']))
 
     with open('results.csv', 'a') as f:
-        f.write(u'{},{},{}\n'.format(args.target_brand, target_brand_name, str(result['Accuracy'])).encode('shift-jis'))
+        f.write('{},{},{}\n'.format(args.target_brand, target_brand_name, str(result['Accuracy'])))

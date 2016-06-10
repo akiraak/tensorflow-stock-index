@@ -7,6 +7,8 @@ import pandas as pd
 import lxml.html
 import re
 import time
+import argparse
+from brands import all_brands
 
 
 dateMatch = re.compile(u'(\d+)年(\d+)月(\d+)日')
@@ -138,7 +140,7 @@ class YahooJp(Download):
             if len(pagePrices) > 0:
                 prices.extend(pagePrices)
                 page += 1
-                time.sleep(0.1)
+                #time.sleep(0.1)
             else:
                 break
         print ''
@@ -146,3 +148,13 @@ class YahooJp(Download):
         with open(self.filePath, 'w') as f:
             f.write(csv)
         return csv
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--skip', type=int, default=0)
+    args = parser.parse_args()
+
+    for (i, (code, name, _)) in enumerate(all_brands[args.skip:]):
+        print '{} / {}'.format(args.skip + i + 1, len(all_brands)), code, name
+        YahooJp(code)
