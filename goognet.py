@@ -449,7 +449,7 @@ if __name__ == '__main__':
     parser.add_argument('--steps', type=int, default=10000)
     parser.add_argument('--checkin', type=int, default=1000)
     parser.add_argument('--use-subset', type=float, default=None)
-    parser.add_argument('--inspect', type=bool, default=False)
+    parser.add_argument('--inspect', default=False, action='store_true')
 
     args = parser.parse_args()
 
