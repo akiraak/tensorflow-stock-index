@@ -247,81 +247,119 @@ def split_training_test_data(num_categories, training_test_data):
 
 
 def tf_confusion_metrics(model, actual_classes, session, feed_dict):
-    '''与えられたネットワークの正解率などを出力する。
+    '''与えられたネットワークの評価指標を出力する。
     '''
+    # 予測したカテゴリのインデックスを取得するオペレーター
     predictions = tf.argmax(model, 1)
+    # 正解カテゴリのインデックスを取得するオペレーター
+    # 日数 x 1
     actuals = tf.argmax(actual_classes, 1)
 
+    # 1を詰めたactualsと同じサイズの行列を作る
     ones_like_actuals = tf.ones_like(actuals)
+    # 0を詰めたactualsと同じサイズの行列を作る
     zeros_like_actuals = tf.zeros_like(actuals)
+    # 1を詰めたpredictionsと同じサイズの行列を作る
     ones_like_predictions = tf.ones_like(predictions)
+    # 0を詰めたpredictionsと同じサイズの行列を作る
     zeros_like_predictions = tf.zeros_like(predictions)
 
+    # true-positives: 真陽性の数を数える
     tp_op = tf.reduce_sum(
         tf.cast(
+            # 正解と予測、共に1であるか？
             tf.logical_and(
+                # 正解のインデックスが1であるか？
                 tf.equal(actuals, ones_like_actuals),
+                # 予測のインデックスが1であるか？
                 tf.equal(predictions, ones_like_predictions)
             ),
             "float"
         )
     )
 
+    # true-negatives: 真陰性の数を数える
     tn_op = tf.reduce_sum(
         tf.cast(
+            # 正解と予測、共に0であるか？
             tf.logical_and(
+                # 正解のインデックスが0であるか？
                 tf.equal(actuals, zeros_like_actuals),
+                # 予測のインデックスが0であるか？
                 tf.equal(predictions, zeros_like_predictions)
             ),
             "float"
         )
     )
 
+    # false-positives: 偽陽性の数を数える
     fp_op = tf.reduce_sum(
         tf.cast(
+            # 正解は0、予測は1であるか？
             tf.logical_and(
+                # 正解のインデックスが0であるか？
                 tf.equal(actuals, zeros_like_actuals),
+                # 予測のインデックスが1であるか？
                 tf.equal(predictions, ones_like_predictions)
             ),
             "float"
         )
     )
 
+    # false-negatives: 偽陰性の数を数える
     fn_op = tf.reduce_sum(
         tf.cast(
+            # 正解は1、予測は0であるか？
             tf.logical_and(
+                # 正解のインデックスが1であるか？
                 tf.equal(actuals, ones_like_actuals),
+                # 予測のインデックスが0であるか？
                 tf.equal(predictions, zeros_like_predictions)
             ),
             "float"
         )
     )
 
+    # 実際の値を得る
     tp, tn, fp, fn = session.run(
         [tp_op, tn_op, fp_op, fn_op],
         feed_dict
     )
 
+    # 実際に陽性カテゴリに分類される全ケースに比べ、正しく判定されたものの割合
     tpr = float(tp)/(float(tp) + float(fn))
+    # 実際に陽性カテゴリに分類される全ケースに比べ、誤って陽性とされたものの割合
     fpr = float(fp)/(float(tp) + float(fn))
 
+    # 正解度は、全ケースのうち正しく陽性・陰性を予測できたものの割合である
     accuracy = (float(tp) + float(tn))/(float(tp) + float(fp) + float(fn) + float(tn))
 
+    # 再現率は、上で定義したtprと同じ意味
     recall = tpr
+
+    # 陽性と予測したケースが1つでもある場合
     if (float(tp) + float(fp)):
+        # 適合率は、陽性と予測したもののうち実際に陽性であるものの割合である
         precision = float(tp)/(float(tp) + float(fp))
+        # F1値に意味がある場合
         if (precision + recall) != 0:
+            # F1値は、適合率と再現率の調和平均である
             f1_score = (2 * (precision * recall)) / (precision + recall)
         else:
             f1_score = 0
+    # 陽性と予測したケースがまったくなかった場合
     else:
         precision = 0
         f1_score = 0
 
     return {
+        # 精度、適合率
         'Precision': precision,
+        # 再現率
         'Recall': recall,
+        # F1値
         'F1 Score': f1_score,
+        # 正確度
         'Accuracy': accuracy
     }
 
