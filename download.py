@@ -18,37 +18,49 @@ class Download(object):
     FROM_YEAR = '1991'
     SAVE_PATH = 'data'
 
-    def __init__(self):
+    def __init__(self, auto_upload=False):
+        self.auto_upload = auto_upload
         # ファイル保存用のディレクトリを作成
         if not os.path.isdir(self.SAVE_PATH):
             os.makedirs(self.SAVE_PATH)
-        self.csv = None
 
     @property
     def filePath(self):
         return ''
 
     def _fetchCSV(self):
-        if os.path.exists(self.filePath):
-            #print('fetch CSV for local: ' + self.filePath)
-            with open(self.filePath) as f:
-                return f.read()
+        if self.auto_upload and os.path.exists(self.filePath):
+            self._save_prices(self._upload_prices())
         else:
-            return self._download()
+            if not os.path.exists(self.filePath):
+                self._save_prices(self._download_prices())
 
-    def _download(self):
-        return ""
+    def _download_prices(self):
+        return []
+
+    def _upload_prices(self):
+        return []
 
     @property
     def dataframe(self):
         return pd.read_csv(self.filePath).set_index('Date').sort_index()
 
+    def _save_prices(self, prices):
+        csv = '\n'.join([','.join(price) for price in prices])
+        with open(self.filePath, 'w') as f:
+            f.write(csv)
+
+    @classmethod
+    def _str_to_date(cls, str_date):
+        date = str_date.split('-')
+        return datetime.date(int(date[0]), int(date[1]), int(date[2]))
+
 
 class YahooCom(Download):
-    def __init__(self, code):
-        super(YahooCom, self).__init__()
+    def __init__(self, code, auto_upload=False):
+        super(YahooCom, self).__init__(auto_upload)
         self.code = code
-        self.csv = self._fetchCSV()
+        self._fetchCSV()
 
     @property
     def filePath(self):
@@ -65,19 +77,20 @@ class YahooCom(Download):
             str(now.year)
         )
 
-    def _download(self):
+    def _download_prices(self):
         print('fetch CSV for url: ' + self._url)
         csv = urllib2.urlopen(self._url).read()
-        with open(self.filePath, 'w') as f:
-            f.write(csv)
-        return csv
+        return [line.split(',') for line in csv.split('\n')]
+
+    def _upload_prices(self):
+        return self._download_prices()
 
 
 class YahooJp(Download):
-    def __init__(self, code):
-        super(YahooJp, self).__init__()
+    def __init__(self, code, auto_upload=False):
+        super(YahooJp, self).__init__(auto_upload)
         self.code = code
-        self.csv = self._fetchCSV()
+        self._fetchCSV()
 
     @property
     def filePath(self):
@@ -128,26 +141,45 @@ class YahooJp(Download):
             prices = self._getPrices(html, 6)
         return prices
 
-    def _download(self):
+    def _download_prices(self, limit_date=None):
         print 'fetch CSV for url: ' + self._url(1),
         sys.stdout.flush()
         page = 1
         prices = [['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
-        while True:
+        fetch = True
+        while fetch:
             print page,
             sys.stdout.flush()
             pagePrices = self._downloadPage(page)
             if len(pagePrices) > 0:
-                prices.extend(pagePrices)
+                if limit_date:
+                    for price in pagePrices:
+                        date = self._str_to_date(price[0])
+                        if date > limit_date:
+                            prices.append(price)
+                        else:
+                            fetch = False
+                            break
+                else:
+                    prices.extend(pagePrices)
                 page += 1
                 #time.sleep(0.1)
             else:
-                break
+                fetch = False
         print ''
-        csv = '\n'.join([','.join(price) for price in prices])
-        with open(self.filePath, 'w') as f:
-            f.write(csv)
-        return csv
+        return prices
+
+    def _upload_prices(self):
+        with open(self.filePath) as f:
+            prices = [line.split(',') for line in f.read().split('\n')]
+
+        if len(prices) >= 2:
+            last_date = self._str_to_date(prices[1][0])
+            new_prices = self._download_prices(limit_date=last_date)
+            new_prices.extend(prices[1:])
+            return new_prices
+        else:
+            return self._download_prices()
 
 
 if __name__ == '__main__':
