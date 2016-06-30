@@ -18,8 +18,17 @@ class Download(object):
     FROM_YEAR = '1991'
     SAVE_PATH = 'data'
 
+    COL_DATE = 0
+    COL_OPEN = 1
+    COL_HIGH = 2
+    COL_LOW = 3
+    COL_CLOSE = 4
+    COL_VOLUME = 5
+    COL_ADJ_CLOSE = 6
+
     def __init__(self, auto_upload=False):
         self.auto_upload = auto_upload
+        self.prices = []
         # ファイル保存用のディレクトリを作成
         if not os.path.isdir(self.SAVE_PATH):
             os.makedirs(self.SAVE_PATH)
@@ -30,10 +39,12 @@ class Download(object):
 
     def _fetchCSV(self):
         if self.auto_upload and os.path.exists(self.filePath):
-            self._save_prices(self._upload_prices())
+            self.prices = self._upload_prices()
+            self._save_prices()
         else:
             if not os.path.exists(self.filePath):
-                self._save_prices(self._download_prices())
+                self.prices = self._download_prices()
+                self._save_prices()
 
     def _download_prices(self):
         return []
@@ -43,10 +54,22 @@ class Download(object):
 
     @property
     def dataframe(self):
+        if len(self.prices) == 0:
+            with open(self.filePath) as f:
+                self.prices = [line.split(',') for line in f.read().split('\n')][1:]
         return pd.read_csv(self.filePath).set_index('Date').sort_index()
 
-    def _save_prices(self, prices):
-        csv = '\n'.join([','.join(price) for price in prices])
+    def price(self, str_date):
+        for price in self.prices:
+            if price[0] == str_date:
+                return price
+        return None
+
+    def _save_prices(self):
+        header = [['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
+        datas = header + self.prices
+        print(datas)
+        csv = '\n'.join([','.join(line) for line in datas])
         with open(self.filePath, 'w') as f:
             f.write(csv)
 
@@ -80,7 +103,7 @@ class YahooCom(Download):
     def _download_prices(self):
         print('fetch CSV for url: ' + self._url)
         csv = urllib2.urlopen(self._url).read()
-        return [line.split(',') for line in csv.split('\n')]
+        return [line.split(',') for line in csv.split('\n')[1:]]
 
     def _upload_prices(self):
         return self._download_prices()
@@ -145,7 +168,7 @@ class YahooJp(Download):
         print 'fetch CSV for url: ' + self._url(1),
         sys.stdout.flush()
         page = 1
-        prices = [['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
+        prices = []
         fetch = True
         while fetch:
             print page,

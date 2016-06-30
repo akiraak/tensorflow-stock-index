@@ -2,47 +2,32 @@
 import os
 from brands import all_brands
 
-
-with open('results.csv', 'w') as f:
-    f.write('Code,Name,Accuracy\n')
-
+results_file_path = 'results.csv'
 exist_codes = []
-count = 0
-datas = all_brands
-for (i, (code, name, _)) in enumerate(datas):
-    print '{} / {}: {} {}'.format(count + 1, len(datas), code, name)
+
+if not os.path.exists(results_file_path):
+    # ファイルが存在しない場合は新規作成
+    with open(results_file_path, 'w') as f:
+        f.write('コード,銘柄名,正解率,買い判定数,買い正解数,売り判定数,売り正解数\n')
+else:
+    # ファイルが存在する場合は全ての code を取得する
+    with open(results_file_path) as f:
+        prices = [line.split(',') for line in f.read().split('\n')]
+        prices = [price for price in prices if len(price) > 0 and price[0]]
+        if len(prices) >= 2:
+            exist_codes = [priee[0] for priee in prices[1:] if len(priee) >= 2]
+
+# 計算が必要な銘柄数
+calc_size = len(all_brands) - len(exist_codes)
+
+# 計算する
+calc_count = 0
+for (code, name, _) in all_brands:
+    print '{} / {}: {} {}'.format(calc_count + 1, calc_size, code, name)
     if not code in exist_codes:
-        count += 1
-        os.system('python goognet.py {}'.format(code))
-
-"""
-exist_codes = []
-output = ['コード,名称,正解率,データ日数,平均取引高,平均株価上下幅']
-with open('results.csv', 'r') as f:
-    lines =  f.readlines()[1:]
-    for line in lines:
-        (code, name, accuracy) = line.strip().split(',')
-        print code
-        with open('data/YH_JP_{}.csv'.format(code), 'r') as f2:
-            prices =  f2.readlines()[1:]
-            count = len(prices)
-
-            valumes = []
-            gap = []
-            for (i, price) in enumerate(prices):
-                price_datas = price.split(',')
-                valumes.append(int(price_datas[5]))
-                if price_datas[1] != '---' and price_datas[4] != '---':
-                    price_open = float(price_datas[1])
-                    price_close = float(price_datas[4])
-                    gap.append(abs(price_close - price_open))
-                else:
-                    gap.append(0)
-            valume_avg = sum(valumes) / count
-            gap_avg = int(sum(gap) / count)
-            code_output = '[' + code + '](http://stocks.finance.yahoo.co.jp/stocks/detail/?code=' + code + ')'
-            output.append(','.join([code_output, name, accuracy, str(count) + '日', str(valume_avg) + '株', str(gap_avg) + '円']))
-
-with open('results2.csv', 'w') as f:
-    f.write('\n'.join(output))
-"""
+        # 計算されていないものを実行する
+        calc_count += 1
+        commena = 'python goognet.py {}'.format(code)
+        os.system(commena)
+    else:
+        print 'exist {}'.format(code)
