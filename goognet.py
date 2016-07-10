@@ -8,7 +8,7 @@ from __future__ import print_function
 import datetime
 import urllib2
 import math
-from os import path
+import os
 import operator as op
 from collections import namedtuple
 import numpy as np
@@ -22,9 +22,17 @@ from brands import brand_name
 TEST_COUNT = 200        # テスト日数
 TRAIN_MIN = 800         # 学習データの最低日数
 DAYS_BACK = 3           # 過去何日分を計算に使用するか
-STEPS = 10000           # 学習回数
+STEPS = 50000           # 学習回数
+#STEPS = 1000           # 学習回数
 CHECKIN_INTERVAL = 1000 # 学習の途中結果を表示する間隔
 REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
+PASS_DAYS = 10          # 除外する古いデータの日数
+
+CLASS_DOWN = 0
+CLASS_NEUTRAL = 1
+CLASS_UP = 2
+CLASS_COUNT = 3
+CLASS_LABELS = ['DOWN', 'NEUTRAL', 'UP']
 
 
 # 銘柄情報の入れ物
@@ -91,6 +99,7 @@ def get_using_data(dataframes):
     for exchange, dataframe in dataframes.items():
         using_data['{}_OPEN'.format(exchange)] = dataframe['Open']
         using_data['{}_CLOSE'.format(exchange)] = dataframe['Close']
+        # TODO: 他の価格も扱えるようにする（安値／高値／出来高）
     using_data = using_data.fillna(method='ffill')
     return using_data
 
@@ -111,8 +120,23 @@ def get_log_return_data(stocks, using_data):
         # np.log(当日終値 / 前日終値) で前日からの変化率を算出
         # 前日よりも上がっていればプラス、下がっていればマイナスになる
         log_return_data['{}_CLOSE_RATE'.format(name)] = np.log(using_data[close_column]/using_data[close_column].shift())
-        # 終値 >= 始値 なら1。それ意外は0
-        log_return_data['{}_RESULT'.format(name)] = map(int, using_data[close_column] >= using_data[open_column])
+        # TODO: 他の価格も加える（安値／高値／出来高）
+
+        # 答を求める
+        answers = []
+        # 下がる／上がると判断する変化率
+        change_rate = 0.02
+        for value in (using_data[close_column] / using_data[open_column]).values:
+            if value < (1 - change_rate):
+                # 下がる
+                answers.append(CLASS_DOWN)
+            elif value > (1 + change_rate):
+                # 上がる
+                answers.append(CLASS_UP)
+            else:
+                # 変化なし
+                answers.append(CLASS_NEUTRAL)
+        log_return_data['{}_RESULT'.format(name)] = answers
 
     return log_return_data
 
@@ -130,74 +154,39 @@ def build_training_data(stocks, log_return_data, target_brand, max_days_back=DAY
         pd.DataFrame()
     '''
 
-    columns = ['positive', 'negative']
+    columns = ['answer_{}'.format(label) for label in CLASS_LABELS]
 
-    # 「上がる」「下がる」の結果を
-    log_return_data['positive'] = 0
-    positive_indices = op.eq(log_return_data['{}_RESULT'.format(target_brand)], 1)
-    log_return_data.ix[positive_indices, 'positive'] = 1
-    log_return_data['negative'] = 0
-    negative_indices = op.eq(log_return_data['{}_RESULT'.format(target_brand)], 0)
-    log_return_data.ix[negative_indices, 'negative'] = 1
-
-    num_categories = len(columns)
+    # 答を詰める
+    for i in range(CLASS_COUNT):
+        column = columns[i]
+        log_return_data[column] = 0
+        indices = op.eq(log_return_data['{}_RESULT'.format(target_brand)], i)
+        log_return_data.ix[indices, column] = 1
 
     # 各指標のカラム名を追加
     for colname, _, _ in iter_exchange_days_back(stocks, target_brand, max_days_back):
         columns.append(colname)
-
-    '''
-    columns には計算対象の positive, negative と各指標の日数分のラベルが含まれる
-    例：[
-        'positive',
-        'negative',
-        'DOW_0',
-        'DOW_1',
-        'DOW_2',
-        'FTSE_0',
-        'FTSE_1',
-        'FTSE_2',
-        'GDAXI_0',
-        'GDAXI_1',
-        'GDAXI_2',
-        'HSI_0',
-        'HSI_1',
-        'HSI_2',
-        'N225_0',
-        'N225_1',
-        'N225_2',
-        'NASDAQ_0',
-        'NASDAQ_1',
-        'NASDAQ_2',
-        'SP500_1',
-        'SP500_2',
-        'SP500_3',
-        'SSEC_0',
-        'SSEC_1',
-        'SSEC_2'
-    ]
-    計算対象の SP500 だけ当日のデータを含めたらダメなので1〜3が入る
-    '''
 
     # データ数をもとめる
     max_index = len(log_return_data)
 
     # 学習データを作る
     training_test_data = pd.DataFrame(columns=columns)
-    for i in range(max_days_back + 10, max_index):
-        # 先頭のデータを含めるとなぜか上手くいかないので max_days_back + 10 で少し省く
+    for i in range(max_days_back + PASS_DAYS, max_index):
+        # 先頭のデータを含めるとなぜか上手くいかないので max_days_back + PASS_DAYS で少し省く
         values = {}
-        # 「上がる」「下がる」の答を入れる
-        values['positive'] = log_return_data['positive'].ix[i]
-        values['negative'] = log_return_data['negative'].ix[i]
+        # 答を入れる
+        for answer_i in range(CLASS_COUNT):
+            column = columns[answer_i]
+            values[column] = log_return_data[column].ix[i]
         # 学習データを入れる
         for colname, exchange, days_back in iter_exchange_days_back(stocks, target_brand, max_days_back):
             values[colname] = log_return_data['{}_CLOSE_RATE'.format(exchange)].ix[i - days_back]
         training_test_data = training_test_data.append(values, ignore_index=True)
 
     # index（日付ラベル）を引き継ぐ
-    training_test_data.index = log_return_data.index[max_days_back + 10: max_index]
-    return num_categories, training_test_data
+    training_test_data.index = log_return_data.index[max_days_back + PASS_DAYS: max_index]
+    return CLASS_COUNT, training_test_data
 
 
 def iter_exchange_days_back(stocks, target_brand, max_days_back):
@@ -213,9 +202,9 @@ def iter_exchange_days_back(stocks, target_brand, max_days_back):
 def split_training_test_data(num_categories, training_test_data):
     '''学習データをトレーニング用とテスト用に分割する。
     '''
-    # 先頭２つより後ろが学習データ
+    # 先頭のいくつかより後ろが学習データ
     predictors_tf = training_test_data[training_test_data.columns[num_categories:]]
-    # 先頭２つが「上がる」「下がる」の答えデータ
+    # 先頭のいくつかが答えデータ
     classes_tf = training_test_data[training_test_data.columns[:num_categories]]
 
     # 学習用とテスト用のデータサイズを求める
@@ -228,128 +217,6 @@ def split_training_test_data(num_categories, training_test_data):
         test_predictors=predictors_tf[training_set_size:],
         test_classes=classes_tf[training_set_size:],
     )
-
-
-def tf_confusion_metrics(model, actual_classes, session, feed_dict):
-    '''与えられたネットワークの評価指標を出力する。
-    '''
-    # 予測したカテゴリのインデックスを取得するオペレーター
-    predictions = tf.argmax(model, 1)
-    # 正解カテゴリのインデックスを取得するオペレーター
-    # 日数 x 1
-    actuals = tf.argmax(actual_classes, 1)
-
-    # 1を詰めたactualsと同じサイズの行列を作る
-    ones_like_actuals = tf.ones_like(actuals)
-    # 0を詰めたactualsと同じサイズの行列を作る
-    zeros_like_actuals = tf.zeros_like(actuals)
-    # 1を詰めたpredictionsと同じサイズの行列を作る
-    ones_like_predictions = tf.ones_like(predictions)
-    # 0を詰めたpredictionsと同じサイズの行列を作る
-    zeros_like_predictions = tf.zeros_like(predictions)
-
-    # true-positives: 真陽性の数を数える
-    tp_op = tf.reduce_sum(
-        tf.cast(
-            # 正解と予測、共に1であるか？
-            tf.logical_and(
-                # 正解のインデックスが1であるか？
-                tf.equal(actuals, ones_like_actuals),
-                # 予測のインデックスが1であるか？
-                tf.equal(predictions, ones_like_predictions)
-            ),
-            "float"
-        )
-    )
-
-    # true-negatives: 真陰性の数を数える
-    tn_op = tf.reduce_sum(
-        tf.cast(
-            # 正解と予測、共に0であるか？
-            tf.logical_and(
-                # 正解のインデックスが0であるか？
-                tf.equal(actuals, zeros_like_actuals),
-                # 予測のインデックスが0であるか？
-                tf.equal(predictions, zeros_like_predictions)
-            ),
-            "float"
-        )
-    )
-
-    # false-positives: 偽陽性の数を数える
-    fp_op = tf.reduce_sum(
-        tf.cast(
-            # 正解は0、予測は1であるか？
-            tf.logical_and(
-                # 正解のインデックスが0であるか？
-                tf.equal(actuals, zeros_like_actuals),
-                # 予測のインデックスが1であるか？
-                tf.equal(predictions, ones_like_predictions)
-            ),
-            "float"
-        )
-    )
-
-    # false-negatives: 偽陰性の数を数える
-    fn_op = tf.reduce_sum(
-        tf.cast(
-            # 正解は1、予測は0であるか？
-            tf.logical_and(
-                # 正解のインデックスが1であるか？
-                tf.equal(actuals, ones_like_actuals),
-                # 予測のインデックスが0であるか？
-                tf.equal(predictions, zeros_like_predictions)
-            ),
-            "float"
-        )
-    )
-
-    fn_op2 = tf.equal(predictions, ones_like_predictions)
-    fn_op3 = tf.equal(predictions, zeros_like_predictions)
-
-    # 実際の値を得る
-    tp, tn, fp, fn, fn2, fn3 = session.run(
-        [tp_op, tn_op, fp_op, fn_op, fn_op2, fn_op3],
-        feed_dict
-    )
-    #print(tp, tn, fp, fn, fn2, fn3)
-
-    # 実際に陽性カテゴリに分類される全ケースに比べ、正しく判定されたものの割合
-    tpr = float(tp)/(float(tp) + float(fn))
-    # 実際に陽性カテゴリに分類される全ケースに比べ、誤って陽性とされたものの割合
-    fpr = float(fp)/(float(tp) + float(fn))
-
-    # 正解度は、全ケースのうち正しく陽性・陰性を予測できたものの割合である
-    accuracy = (float(tp) + float(tn))/(float(tp) + float(fp) + float(fn) + float(tn))
-
-    # 再現率は、上で定義したtprと同じ意味
-    recall = tpr
-
-    # 陽性と予測したケースが1つでもある場合
-    if (float(tp) + float(fp)):
-        # 適合率は、陽性と予測したもののうち実際に陽性であるものの割合である
-        precision = float(tp)/(float(tp) + float(fp))
-        # F1値に意味がある場合
-        if (precision + recall) != 0:
-            # F1値は、適合率と再現率の調和平均である
-            f1_score = (2 * (precision * recall)) / (precision + recall)
-        else:
-            f1_score = 0
-    # 陽性と予測したケースがまったくなかった場合
-    else:
-        precision = 0
-        f1_score = 0
-
-    return {
-        # 精度、適合率
-        'Precision': precision,
-        # 再現率
-        'Recall': recall,
-        # F1値
-        'F1 Score': f1_score,
-        # 正確度
-        'Accuracy': accuracy
-    }
 
 
 def smarter_network(stocks, dataset):
@@ -369,16 +236,16 @@ def smarter_network(stocks, dataset):
     weights2 = tf.Variable(tf.truncated_normal([50, 25], stddev=0.0001))
     biases2 = tf.Variable(tf.ones([25]))
 
-    weights3 = tf.Variable(tf.truncated_normal([25, 2], stddev=0.0001))
-    biases3 = tf.Variable(tf.ones([2]))
+    weights3 = tf.Variable(tf.truncated_normal([25, CLASS_COUNT], stddev=0.0001))
+    biases3 = tf.Variable(tf.ones([CLASS_COUNT]))
 
-    # This time we introduce a single hidden layer into our model...
+    # 予測を行う計算（予測に使用する）
     hidden_layer_1 = tf.nn.relu(tf.matmul(feature_data, weights1) + biases1)
     hidden_layer_2 = tf.nn.relu(tf.matmul(hidden_layer_1, weights2) + biases2)
     model = tf.nn.softmax(tf.matmul(hidden_layer_2, weights3) + biases3)
 
+    # 予測が正しいかを計算（学習に使用する）
     cost = -tf.reduce_sum(actual_classes*tf.log(model))
-
     training_step = tf.train.AdamOptimizer(learning_rate=0.0001).minimize(cost)
 
     init = tf.initialize_all_variables()
@@ -394,12 +261,17 @@ def smarter_network(stocks, dataset):
     )
 
 
-def train(env):
+def train(env, target_prices):
     '''学習をsteps回おこなう。
     '''
+
+    # 予測（model）と実際の値（actual）が一致（equal）した場合の配列を取得する
+    #   結果の例: [1,1,0,1,0] 1が正解
     correct_prediction = tf.equal(
         tf.argmax(env.model, 1),
         tf.argmax(env.actual_classes, 1))
+    # 結果（例：[1,1,0,1,0] 1が正解）を float にキャストして
+    # 全ての平均（reduce_mean）を得る
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
     bestResult = None
@@ -409,51 +281,68 @@ def train(env):
             feed_dict=feed_dict(env, test=False),
         )
         if i % CHECKIN_INTERVAL == 0:
-            print(i, env.sess.run(
-                accuracy,
-                feed_dict=feed_dict(env, test=False),
-            ))
-            """
-            # テストデータで正解率を求める
-            result = tf_confusion_metrics(env.model, env.actual_classes, env.sess, feed_dict(env, True))
-            if not bestResult:
-                bestResult = result
-            else:
-                bast = math.fabs(bestResult['Accuracy'] - 0.5)
-                now = math.fabs(result['Accuracy'] - 0.5)
-                print(bast, now)
-                if bast < now:
-                    bestResult = result
-            """
-
-    bestResult = tf_confusion_metrics(env.model, env.actual_classes, env.sess, feed_dict(env, True))
-    return bestResult
+            money, trues, falses, actual_count, deal_logs = gamble(env, target_prices)
+            print(i, '{:,d}円'.format(money))
 
 
-def expect(env, date):
-    '''指定された日付の株価を予想する
-    Returns:
-        Boolean: True=上がる False=下がる
-    '''
-    prefix = 'test'
-    predictors = getattr(env.dataset, '{}_predictors'.format(prefix))
-    classes = getattr(env.dataset, '{}_classes'.format(prefix))
-    feed_dict = {
-        env.feature_data: np.array([predictors.ix[date].values]),
-        env.actual_classes: np.array([classes.ix[date].values])
-    }
-    predictions = tf.argmax(env.model, 1)
-    actuals = tf.argmax(env.actual_classes, 1)
-    ones_like_actuals = tf.ones_like(actuals)
-    zeros_like_actuals = tf.zeros_like(actuals)
-    ones_like_predictions = tf.ones_like(predictions)
-    zeros_like_predictions = tf.zeros_like(predictions)
-    op = tf.equal(predictions, ones_like_predictions)
-    result = env.sess.run(
-        op,
-        feed_dict
+# 売買シミュレーション
+def gamble(env, target_prices):
+    # 予想
+    expectations = env.sess.run(
+        tf.argmax(env.model, 1),
+        feed_dict=feed_dict(env, test=True),
     )
-    return result[0]
+
+    # 元金
+    money = 10000 * 1000
+    # 売買履歴
+    deal_logs = []
+    # 予想が当たった数
+    trues = np.zeros(CLASS_COUNT, dtype=np.int64)
+    # 予想が外れた数
+    falses = np.zeros(CLASS_COUNT, dtype=np.int64)
+    # 実際の結果の数
+    actual_count = np.zeros(CLASS_COUNT, dtype=np.int64)
+    # 実際の結果
+    actual_classes = getattr(env.dataset, 'test_classes')
+
+    # 結果の集計と売買シミュレーション
+    for (i, date) in enumerate(env.dataset.test_predictors.index):
+        expectation = expectations[i]
+        if expectation == CLASS_UP:
+            # 上がる予想なので買う
+            price = target_prices.download.price(date)
+            if price != None:
+                 # 始値
+                open_value = float(price[Download.COL_OPEN])
+                # 終値
+                close_value = float(price[Download.COL_CLOSE])
+                # 購入可能な株数
+                value = money / open_value
+                # 購入金額
+                buy_value = int(open_value * value)
+                # 売却金額
+                sell_value = int(close_value * value)
+                # 購入
+                money -= buy_value
+                # 購入手数料の支払い
+                money -= buy_charge(buy_value)
+                # 売却
+                money += sell_value
+                # 売却手数料の支払い
+                money -= buy_charge(sell_value)
+
+        actual = np.argmax(actual_classes.ix[date].values)
+        if expectation == actual:
+            # 当たった
+            trues[expectation] += 1
+        else:
+            # 外れた
+            falses[expectation] += 1
+        actual_count[actual] += 1
+        deal_logs.append([date, CLASS_LABELS[expectation], CLASS_LABELS[actual], money])
+
+    return money, trues, falses, actual_count, deal_logs
 
 
 def feed_dict(env, test=False):
@@ -486,77 +375,27 @@ def buy_charge(yen):
         return 960
 
 
-# 売買シミュレーション
-def gamble(stocks, target_brand, env):
-    money = 10000000 # 元金
-    positive_correct = 0
-    negative_correct = 0
-    results = []
-    target_prices = stocks[target_brand]
-    for date in env.dataset.test_predictors.index:
-        # 予測する
-        expectation = expect(env, date)
-        results.append(expectation)
-        if expectation:
-            # 上がるので買う
-            price = target_prices.download.price(date)
-            if price != None:
-                open_value = float(price[Download.COL_OPEN])    # 始値
-                close_value = float(price[Download.COL_CLOSE])  # 終値
-                value = money / open_value                      # 購入可能な株数
-                buy_value = int(open_value * value)             # 購入金額
-                sell_value = int(close_value * value)           # 売却金額
-                # 購入
-                money -= buy_value
-                # 購入手数料の支払い
-                money -= buy_charge(buy_value)
-                # 売却
-                money += sell_value
-                # 売却手数料の支払い
-                money -= buy_charge(sell_value)
-                # 購入の予想が当たっていたか
-                if close_value > open_value:
-                    positive_correct += 1
-        else:
-            # 下がるので買わない
-            price = target_prices.download.price(date)
-            if price != None:
-                open_value = float(price[Download.COL_CLOSE])   # 始値
-                close_value = float(price[Download.COL_OPEN])   # 終値
-                # 下がるという予想が当たっていたか
-                if close_value < open_value:
-                    negative_correct += 1
-
-
-    day_count = len(results)
-    # 買い予想日数
-    positive_expectation = len([r for r in results if r == True])
-    # 売り予想日数
-    negative_expectation = day_count - positive_expectation
-    # 買い予想の正解日数
-    positive_expectation_rate = int(positive_correct / float(positive_expectation) * 100) if positive_expectation != 0 else 0
-    # 売り予想の正解日数
-    negative_expectation_rate = int(negative_correct / float(negative_expectation) * 100) if negative_expectation != 0 else 0
-    print('買い回数 {} 日中 {} 日'.format(day_count, positive_expectation))
-    print('買い正解率 {}/{} {}%'.format(positive_correct, positive_expectation, positive_expectation_rate))
-    print('売り正解率 {}/{} {}%'.format(negative_correct, negative_expectation, negative_expectation_rate))
-    print('売買シミュレーション結果 {:,d}円'.format(money))
-    return money, day_count, positive_expectation, positive_correct, negative_expectation, negative_correct
+def save_deal_logs(target_brand, deal_logs):
+    save_dir = 'deal_logs'
+    if not os.path.exists(save_dir):
+        os.mkdir(save_dir)
+    with open('{}/{}.csv'.format(save_dir, target_brand), 'w') as f:
+        f.write('\n'.join([','.join([str(log) for log in logs])  for logs in deal_logs]))
 
 
 def main(stocks, target_brand, result_file=None):
+    # 対象の銘柄名
     target_brand_name = brand_name(target_brand)
-    #print('株価指標データを読み込む')
+    # 株価指標データを読み込む
     all_data  = load_exchange_dataframes(stocks, target_brand)
-    #print('終値を取得')
+    # 終値を取得
     using_data = get_using_data(all_data)
-    #print('データを学習に使える形式に正規化')
+    # データを学習に使える形式に正規化
     log_return_data = get_log_return_data(stocks, using_data)
-
-    #print('答と学習データを作る')
+    # 答と学習データを作る
     num_categories, training_test_data = build_training_data(
         stocks, log_return_data, target_brand)
-    #print('学習データをトレーニング用とテスト用に分割する')
+    # 学習データをトレーニング用とテスト用に分割する
     dataset = split_training_test_data(num_categories, training_test_data)
     if len(dataset.training_predictors) < TRAIN_MIN:
         print('[{}]{}: 学習データが少なすぎるため計算を中止'.format(target_brand, target_brand_name))
@@ -564,21 +403,53 @@ def main(stocks, target_brand, result_file=None):
             f.write('{},{},ERROR\n'.format(target_brand, target_brand_name))
         return
 
-    #print('器械学習のネットワークを作成')
+    print('[{}]{}'.format(target_brand, target_brand_name))
+
+    # 器械学習のネットワークを作成
     env = smarter_network(stocks, dataset)
-
-    #print('学習')
-    result = train(env)
-
+    # 学習
+    train(env, stocks[target_brand])
     # 購入シュミレーション
-    money, day_count, positive_expectation, positive_correct, negative_expectation, negative_correct = gamble(stocks, target_brand, env)
+    money, trues, falses, actual_count, deal_logs = gamble(env, stocks[target_brand])
 
-    print('[{}]{}: {}'.format(target_brand, target_brand_name, result['Accuracy']))
+    print('-- テスト --')
+    # 各クラスの正解率
+    rates = np.zeros(CLASS_COUNT, dtype=np.int64)
+    # 各クラスの正解数
+    counts = np.zeros(CLASS_COUNT, dtype=np.int64)
+    for i in range(CLASS_COUNT):
+        counts[i] = trues[i] + falses[i]
+        if counts[i]:
+            # 各クラスの正解率（予想数 / 正解数）
+            rates[i] = int(float(trues[i]) / float(counts[i]) * 100)
+    print('下げ正解率    : {}% 予想{}回'.format(rates[CLASS_DOWN], counts[CLASS_DOWN]))
+    print('変化なし正解率: {}% 予想{}回'.format(rates[CLASS_NEUTRAL], counts[CLASS_NEUTRAL]))
+    print('上げ正解率    : {}% 予想{}回'.format(rates[CLASS_UP], counts[CLASS_UP]))
+
+    print('-- 売買シミュレーション --')
+    print('売買シミュレーション結果 {:,d}円'.format(money))
+
+    # 結果をファイル保存
     if result_file:
         with open(result_file, 'a') as f:
-            f.write('{},{},{},{},{},{},{},{},{}\n'.format(target_brand, target_brand_name, str(result['Accuracy']), money, day_count, positive_expectation, positive_correct, negative_expectation, negative_correct))
+            f.write('{},{},{},{},{},{},{},{},{}\n'.format(
+                target_brand,
+                target_brand_name,
+                money,
+                trues[CLASS_DOWN], falses[CLASS_DOWN],
+                trues[CLASS_NEUTRAL], falses[CLASS_NEUTRAL],
+                trues[CLASS_UP], falses[CLASS_UP]))
     else:
-        print(money, day_count, positive_expectation, positive_correct, negative_expectation, negative_correct)
+        print(
+            target_brand,
+            target_brand_name,
+            money,
+            trues[CLASS_DOWN], falses[CLASS_DOWN],
+            trues[CLASS_NEUTRAL], falses[CLASS_NEUTRAL],
+            trues[CLASS_UP], falses[CLASS_UP])
+
+    # 売買履歴をファイルに保存
+    save_deal_logs(target_brand, deal_logs)
 
 
 if __name__ == '__main__':
@@ -586,8 +457,8 @@ if __name__ == '__main__':
     parser.add_argument('target_brand')
     args = parser.parse_args()
 
-    # 株価指標
     stocks = {
+        # 株価指標
         'DOW': Stock(YahooCom, '^DJI', 1),
         'FTSE': Stock(YahooCom, '^FTSE', 1),
         'GDAXI': Stock(YahooCom, '^GDAXI', 1),
@@ -596,6 +467,7 @@ if __name__ == '__main__':
         'NASDAQ': Stock(YahooCom, '^IXIC', 1),
         'SP500': Stock(YahooCom, '^GSPC', 1),
         'SSEC': Stock(YahooCom, '000001.SS', 1),
+        # 対象の銘柄
         args.target_brand: Stock(YahooJp, args.target_brand, 1)
     }
 
