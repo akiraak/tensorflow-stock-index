@@ -8,7 +8,7 @@ exist_codes = []
 if not os.path.exists(results_file_path):
     # ファイルが存在しない場合は新規作成
     with open(results_file_path, 'w') as f:
-        f.write('コード,銘柄名,残高,上がる正解,上がる不正解,変化なし正解,変化なし不正解,下がる正解,下がる不正解\n')
+        f.write('コード,銘柄名,残高,下がる正解,下がる不正解,変化なし正解,変化なし不正解,上がる正解,上がる不正解\n')
 else:
     # ファイルが存在する場合は全ての code を取得する
     with open(results_file_path) as f:
