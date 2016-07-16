@@ -17,22 +17,27 @@ import tensorflow as tf
 import argparse
 from download import Download, YahooCom, YahooJp
 from brands import brand_name
+from layer_log import LayerLog
+from brands import nikkei225_s
 
 
 TEST_COUNT = 200        # テスト日数
 TRAIN_MIN = 800         # 学習データの最低日数
 DAYS_BACK = 3           # 過去何日分を計算に使用するか
-STEPS = 50000           # 学習回数
-#STEPS = 1000           # 学習回数
-CHECKIN_INTERVAL = 1000 # 学習の途中結果を表示する間隔
+STEPS = 100000          # 学習回数
+CHECKIN_INTERVAL = 100  # 学習の途中結果を表示する間隔
 REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
 PASS_DAYS = 10          # 除外する古いデータの日数
+DROP_RATE = 0.1
 
 CLASS_DOWN = 0
 CLASS_NEUTRAL = 1
 CLASS_UP = 2
 CLASS_COUNT = 3
 CLASS_LABELS = ['DOWN', 'NEUTRAL', 'UP']
+
+# 学習データに使用するパラメータのラベル
+PARAM_LABELS = ['Close', 'High', 'Low', 'Volume']
 
 
 # 銘柄情報の入れ物
@@ -50,7 +55,7 @@ class Stock(object):
 Dataset = namedtuple(
     'Dataset',
     'training_predictors training_classes test_predictors test_classes')
-Environ = namedtuple('Environ', 'sess model actual_classes training_step dataset feature_data')
+Environ = namedtuple('Environ', 'sess model actual_classes training_step dataset feature_data keep_prob')
 
 
 def load_exchange_dataframes(stocks, target_brand):
@@ -97,11 +102,22 @@ def get_using_data(dataframes):
     '''
     using_data = pd.DataFrame()
     for exchange, dataframe in dataframes.items():
-        using_data['{}_OPEN'.format(exchange)] = dataframe['Open']
-        using_data['{}_CLOSE'.format(exchange)] = dataframe['Close']
-        # TODO: 他の価格も扱えるようにする（安値／高値／出来高）
+        using_data['{}_Open'.format(exchange)] = dataframe['Open']
+        using_data['{}_Close'.format(exchange)] = dataframe['Close']
+        using_data['{}_High'.format(exchange)] = dataframe['High']
+        using_data['{}_Low'.format(exchange)] = dataframe['Low']
+        using_data['{}_Volume'.format(exchange)] = dataframe['Volume']
     using_data = using_data.fillna(method='ffill')
     return using_data
+
+
+def zscore(np_array):
+    '''配列の標準化を行う
+    '''
+    a1 = np_array.replace(0, 1.).replace(np.inf, 1.).replace(np.nan, 1.)
+    a2 = a1 - a1.mean()
+    a3 = a2 / a2.std()
+    return a3
 
 
 def get_log_return_data(stocks, using_data):
@@ -115,12 +131,21 @@ def get_log_return_data(stocks, using_data):
 
     log_return_data = pd.DataFrame()
     for (name, stock) in stocks.items():
-        open_column = '{}_OPEN'.format(name)
-        close_column = '{}_CLOSE'.format(name)
+        open_column = '{}_Open'.format(name)
+        close_column = '{}_Close'.format(name)
+        high_column = '{}_High'.format(name)
+        low_column = '{}_Low'.format(name)
+        volume_column = '{}_Volume'.format(name)
+
         # np.log(当日終値 / 前日終値) で前日からの変化率を算出
         # 前日よりも上がっていればプラス、下がっていればマイナスになる
-        log_return_data['{}_CLOSE_RATE'.format(name)] = np.log(using_data[close_column]/using_data[close_column].shift())
-        # TODO: 他の価格も加える（安値／高値／出来高）
+        log_return_data['{}_Close_RATE'.format(name)] = zscore(using_data[close_column]/using_data[close_column].shift())
+        # 当日高値 / 当日始値
+        log_return_data['{}_High_RATE'.format(name)] = zscore(using_data[high_column]/using_data[open_column])
+        # 当日安値 / 当日始値
+        log_return_data['{}_Low_RATE'.format(name)] = zscore(using_data[low_column]/using_data[open_column])
+        # 当日出来高 / 前日出来高
+        log_return_data['{}_Volume_RATE'.format(name)] = zscore(using_data[volume_column]/using_data[volume_column].shift())
 
         # 答を求める
         answers = []
@@ -154,9 +179,8 @@ def build_training_data(stocks, log_return_data, target_brand, max_days_back=DAY
         pd.DataFrame()
     '''
 
-    columns = ['answer_{}'.format(label) for label in CLASS_LABELS]
-
     # 答を詰める
+    columns = ['answer_{}'.format(label) for label in CLASS_LABELS]
     for i in range(CLASS_COUNT):
         column = columns[i]
         log_return_data[column] = 0
@@ -165,7 +189,8 @@ def build_training_data(stocks, log_return_data, target_brand, max_days_back=DAY
 
     # 各指標のカラム名を追加
     for colname, _, _ in iter_exchange_days_back(stocks, target_brand, max_days_back):
-        columns.append(colname)
+        for date_type in PARAM_LABELS:
+            columns.append('{}_{}'.format(colname, date_type))
 
     # データ数をもとめる
     max_index = len(log_return_data)
@@ -181,7 +206,9 @@ def build_training_data(stocks, log_return_data, target_brand, max_days_back=DAY
             values[column] = log_return_data[column].ix[i]
         # 学習データを入れる
         for colname, exchange, days_back in iter_exchange_days_back(stocks, target_brand, max_days_back):
-            values[colname] = log_return_data['{}_CLOSE_RATE'.format(exchange)].ix[i - days_back]
+            for date_type in PARAM_LABELS:
+                col = '{}_{}'.format(colname, date_type)
+                values[col] = log_return_data['{}_{}_RATE'.format(exchange, date_type)].ix[i - days_back]
         training_test_data = training_test_data.append(values, ignore_index=True)
 
     # index（日付ラベル）を引き継ぐ
@@ -219,7 +246,7 @@ def split_training_test_data(num_categories, training_test_data):
     )
 
 
-def smarter_network(stocks, dataset):
+def smarter_network(stocks, dataset, layer1, layer2):
     '''隠しレイヤー入りのもうちょっと複雑な分類モデルを返す。
     '''
     sess = tf.Session()
@@ -229,35 +256,50 @@ def smarter_network(stocks, dataset):
 
     feature_data = tf.placeholder("float", [None, num_predictors])
     actual_classes = tf.placeholder("float", [None, num_classes])
+    keep_prob = tf.placeholder(tf.float32)
 
-    weights1 = tf.Variable(tf.truncated_normal([(DAYS_BACK * len(stocks)), 50], stddev=0.0001))
-    biases1 = tf.Variable(tf.ones([50]))
+    stddev = 1e-4
+    layer_counts = [layer1, layer2, CLASS_COUNT]
+    weights = []
+    biases = []
+    model = None
+    for i, count in enumerate(layer_counts):
+        # 重み付けの変数定義
+        if i == 0:
+            weights = tf.Variable(tf.truncated_normal([num_predictors, count], stddev=stddev))
+        else:
+            weights = tf.Variable(tf.truncated_normal([layer_counts[i - 1], count], stddev=stddev))
+        # バイアスの変数定義
+        biases = tf.Variable(tf.ones([count]))
 
-    weights2 = tf.Variable(tf.truncated_normal([50, 25], stddev=0.0001))
-    biases2 = tf.Variable(tf.ones([25]))
-
-    weights3 = tf.Variable(tf.truncated_normal([25, CLASS_COUNT], stddev=0.0001))
-    biases3 = tf.Variable(tf.ones([CLASS_COUNT]))
-
-    # 予測を行う計算（予測に使用する）
-    hidden_layer_1 = tf.nn.relu(tf.matmul(feature_data, weights1) + biases1)
-    hidden_layer_2 = tf.nn.relu(tf.matmul(hidden_layer_1, weights2) + biases2)
-    model = tf.nn.softmax(tf.matmul(hidden_layer_2, weights3) + biases3)
+        if model == None:
+            # 一番最初のレイヤー
+            model = tf.nn.relu(tf.matmul(feature_data, weights) + biases)
+        else:
+            if (i + 1) < len(layer_counts):
+                # 最後ではないレイヤー
+                model = tf.nn.relu(tf.matmul(model, weights) + biases)
+            else:
+                # 最終レイヤーの前には dropout を入れる
+                model = tf.nn.dropout(model, keep_prob)
+                model = tf.nn.softmax(tf.matmul(model, weights) + biases)
 
     # 予測が正しいかを計算（学習に使用する）
     cost = -tf.reduce_sum(actual_classes*tf.log(model))
-    training_step = tf.train.AdamOptimizer(learning_rate=0.0001).minimize(cost)
+    training_step = tf.train.AdamOptimizer(learning_rate=stddev).minimize(cost)
 
+    # 変数の初期化処理
     init = tf.initialize_all_variables()
     sess.run(init)
 
     return Environ(
-        sess=sess,                      # tensorflow.python.client.session.Session
-        model=model,                    # tensorflow.python.framework.ops.Tensor
-        actual_classes=actual_classes,  # tensorflow.python.framework.ops.Tensor
-        training_step=training_step,    # tensorflow.python.framework.ops.Operation
+        sess=sess,
+        model=model,
+        actual_classes=actual_classes,
+        training_step=training_step,
         dataset=dataset,
-        feature_data=feature_data,      # tensorflow.python.framework.ops.Tensor
+        feature_data=feature_data,
+        keep_prob=keep_prob,
     )
 
 
@@ -274,15 +316,31 @@ def train(env, target_prices):
     # 全ての平均（reduce_mean）を得る
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
-    bestResult = None
+    max_train_accuracy = 0
+    bestScore = None
     for i in range(1, 1 + STEPS):
         env.sess.run(
             env.training_step,
-            feed_dict=feed_dict(env, test=False),
+            feed_dict=feed_dict(env, test=False, keep_prob=(1.0 - DROP_RATE)),
         )
         if i % CHECKIN_INTERVAL == 0:
+            train_accuracy = env.sess.run(
+                accuracy,
+                feed_dict=feed_dict(env, test=False),
+            )
             money, trues, falses, actual_count, deal_logs = gamble(env, target_prices)
-            print(i, '{:,d}円'.format(money))
+            true_count = trues[CLASS_UP] + falses[CLASS_UP]
+            true_rate = 0.
+            if true_count:
+                true_rate = float(trues[CLASS_UP]) / float(true_count)
+            print(i, '{:,d}円 {:.3f} {:.3f}'.format(money, true_rate, train_accuracy))
+            if max_train_accuracy < train_accuracy:
+                max_train_accuracy = train_accuracy
+                bestScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
+            elif train_accuracy < 0.5:
+                break
+
+    return bestScore
 
 
 # 売買シミュレーション
@@ -345,7 +403,7 @@ def gamble(env, target_prices):
     return money, trues, falses, actual_count, deal_logs
 
 
-def feed_dict(env, test=False):
+def feed_dict(env, test=False, keep_prob=1.):
     '''学習/テストに使うデータを生成する。
     '''
     prefix = 'test' if test else 'training'
@@ -353,7 +411,8 @@ def feed_dict(env, test=False):
     classes = getattr(env.dataset, '{}_classes'.format(prefix))
     return {
         env.feature_data: predictors.values,
-        env.actual_classes: classes.values.reshape(len(classes.values), len(classes.columns))
+        env.actual_classes: classes.values.reshape(len(classes.values), len(classes.columns)),
+        env.keep_prob: keep_prob
     }
 
 
@@ -383,7 +442,7 @@ def save_deal_logs(target_brand, deal_logs):
         f.write('\n'.join([','.join([str(log) for log in logs])  for logs in deal_logs]))
 
 
-def main(stocks, target_brand, result_file=None):
+def main(stocks, target_brand, layer1, layer2, result_file=None):
     # 対象の銘柄名
     target_brand_name = brand_name(target_brand)
     # 株価指標データを読み込む
@@ -401,16 +460,23 @@ def main(stocks, target_brand, result_file=None):
         print('[{}]{}: 学習データが少なすぎるため計算を中止'.format(target_brand, target_brand_name))
         with open('results.csv', 'a') as f:
             f.write('{},{},ERROR\n'.format(target_brand, target_brand_name))
+
+        # レイヤー検証ログに保存
+        brands = nikkei225_s
+        codes = [code for (code, name, _) in brands]
+        layerLog = LayerLog('layer_logs', '{}_{}.csv'.format(layer1, layer2), codes)
+        layerLog.add(
+            target_brand,
+            [-1, 0, 0, 0, 0, 0, 0, 0]
+        )
         return
 
     print('[{}]{}'.format(target_brand, target_brand_name))
 
     # 器械学習のネットワークを作成
-    env = smarter_network(stocks, dataset)
+    env = smarter_network(stocks, dataset, layer1, layer2)
     # 学習
-    train(env, stocks[target_brand])
-    # 購入シュミレーション
-    money, trues, falses, actual_count, deal_logs = gamble(env, stocks[target_brand])
+    train_accuracy, money, trues, falses, actual_count, deal_logs = train(env, stocks[target_brand])
 
     print('-- テスト --')
     # 各クラスの正解率
@@ -451,10 +517,27 @@ def main(stocks, target_brand, result_file=None):
     # 売買履歴をファイルに保存
     save_deal_logs(target_brand, deal_logs)
 
+    # レイヤー検証ログに保存
+    brands = nikkei225_s
+    codes = [code for (code, name, _) in brands]
+    layerLog = LayerLog('layer_logs', '{}_{}.csv'.format(layer1, layer2), codes)
+    layerLog.add(
+        target_brand,
+        [
+            train_accuracy,
+            money,
+            trues[CLASS_DOWN], falses[CLASS_DOWN],
+            trues[CLASS_NEUTRAL], falses[CLASS_NEUTRAL],
+            trues[CLASS_UP], falses[CLASS_UP]
+        ]
+    )
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('target_brand')
+    parser.add_argument('--layer1', type=int, default=50)
+    parser.add_argument('--layer2', type=int, default=25)
     args = parser.parse_args()
 
     stocks = {
@@ -466,9 +549,8 @@ if __name__ == '__main__':
         'N225': Stock(YahooCom, '^N225', 1),
         'NASDAQ': Stock(YahooCom, '^IXIC', 1),
         'SP500': Stock(YahooCom, '^GSPC', 1),
-        'SSEC': Stock(YahooCom, '000001.SS', 1),
+        #'SSEC': Stock(YahooCom, '000001.SS', 1),
         # 対象の銘柄
         args.target_brand: Stock(YahooJp, args.target_brand, 1)
     }
-
-    main(stocks, args.target_brand, result_file='results.csv')
+    main(stocks, args.target_brand, args.layer1, args.layer2, result_file='results.csv')
