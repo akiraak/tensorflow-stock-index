@@ -68,7 +68,6 @@ class Download(object):
     def _save_prices(self):
         header = [['Date', 'Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
         datas = header + self.prices
-        print(datas)
         csv = '\n'.join([','.join(line) for line in datas])
         with open(self.filePath, 'w') as f:
             f.write(csv)

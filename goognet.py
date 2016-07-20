@@ -92,7 +92,7 @@ def load_exchange_dataframe(exchange):
     return pd.read_csv('index_{}.csv'.format(exchange)).set_index('Date').sort_index()
 
 
-def get_using_data(dataframes):
+def get_using_data(dataframes, target_brand):
     '''各指標の必要なカラムをまとめて1つのDataFrameに詰める。
 
     Args:
@@ -101,7 +101,9 @@ def get_using_data(dataframes):
         pd.DataFrame()
     '''
     using_data = pd.DataFrame()
-    for exchange, dataframe in dataframes.items():
+    datas = [(target_brand, dataframes[target_brand])]
+    datas.extend([(exchange, dataframe) for exchange, dataframe in dataframes.items() if exchange != target_brand])
+    for exchange, dataframe in datas:
         using_data['{}_Open'.format(exchange)] = dataframe['Open']
         using_data['{}_Close'.format(exchange)] = dataframe['Close']
         using_data['{}_High'.format(exchange)] = dataframe['High']
@@ -128,7 +130,6 @@ def get_log_return_data(stocks, using_data):
     Returns:
         pd.DataFrame()
     '''
-
     log_return_data = pd.DataFrame()
     for (name, stock) in stocks.items():
         open_column = '{}_Open'.format(name)
@@ -448,7 +449,7 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
     # 株価指標データを読み込む
     all_data  = load_exchange_dataframes(stocks, target_brand)
     # 終値を取得
-    using_data = get_using_data(all_data)
+    using_data = get_using_data(all_data, target_brand)
     # データを学習に使える形式に正規化
     log_return_data = get_log_return_data(stocks, using_data)
     # 答と学習データを作る
