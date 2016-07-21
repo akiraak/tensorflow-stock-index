@@ -29,6 +29,7 @@ CHECKIN_INTERVAL = 100  # 学習の途中結果を表示する間隔
 REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
 PASS_DAYS = 10          # 除外する古いデータの日数
 DROP_RATE = 0.1
+UP_RATE = 0.07
 
 CLASS_DOWN = 0
 CLASS_NEUTRAL = 1
@@ -138,6 +139,14 @@ def get_log_return_data(stocks, using_data):
         low_column = '{}_Low'.format(name)
         volume_column = '{}_Volume'.format(name)
 
+        # 学習データの「終値／始値」を取得
+        train_close_rates = (using_data[close_column]/using_data[close_column].shift()).values[:len(using_data[close_column]) - TEST_COUNT]
+        # 小さい順にソートする
+        train_close_rates.sort()
+        # 何%以上上昇した場合に購入するかの閾値を得る
+        up_index = int(len(train_close_rates) * (1. - UP_RATE))
+        up_rate = train_close_rates[up_index] - 1.
+
         # np.log(当日終値 / 前日終値) で前日からの変化率を算出
         # 前日よりも上がっていればプラス、下がっていればマイナスになる
         log_return_data['{}_Close_RATE'.format(name)] = zscore(using_data[close_column]/using_data[close_column].shift())
@@ -151,7 +160,7 @@ def get_log_return_data(stocks, using_data):
         # 答を求める
         answers = []
         # 下がる／上がると判断する変化率
-        change_rate = 0.02
+        change_rate = up_rate
         for value in (using_data[close_column] / using_data[open_column]).values:
             if value < (1 - change_rate):
                 # 下がる
@@ -537,8 +546,8 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('target_brand')
-    parser.add_argument('--layer1', type=int, default=50)
-    parser.add_argument('--layer2', type=int, default=25)
+    parser.add_argument('--layer1', type=int, default=512)
+    parser.add_argument('--layer2', type=int, default=512)
     args = parser.parse_args()
 
     stocks = {
