@@ -23,12 +23,15 @@ from brands import nikkei225_s
 
 TEST_COUNT = 200        # テスト日数
 TRAIN_MIN = 800         # 学習データの最低日数
+TRAIN_MAX = 6000        # 学習データの最大日数
 DAYS_BACK = 3           # 過去何日分を計算に使用するか
-STEPS = 100000          # 学習回数
+STEPS = 10000           # 学習回数
 CHECKIN_INTERVAL = 100  # 学習の途中結果を表示する間隔
 REMOVE_NIL_DATE = True  # 計算対象の日付に存在しないデータを削除する
 PASS_DAYS = 10          # 除外する古いデータの日数
-DROP_RATE = 0.1
+DROP_RATE = 0.1         # 学習時のドロップアウトの比率
+UP_RATE = 0.07          # 上位何パーセントを買いと判断するか
+STDDEV = 1e-4           # 学習係数
 
 CLASS_DOWN = 0
 CLASS_NEUTRAL = 1
@@ -138,6 +141,14 @@ def get_log_return_data(stocks, using_data):
         low_column = '{}_Low'.format(name)
         volume_column = '{}_Volume'.format(name)
 
+        # 学習データの「終値／始値」を取得
+        train_close_rates = (using_data[close_column]/using_data[close_column].shift()).values[:len(using_data[close_column]) - TEST_COUNT]
+        # 小さい順にソートする
+        train_close_rates.sort()
+        # 何%以上上昇した場合に購入するかの閾値を得る
+        up_index = int(len(train_close_rates) * (1. - UP_RATE))
+        up_rate = train_close_rates[up_index] - 1.
+
         # np.log(当日終値 / 前日終値) で前日からの変化率を算出
         # 前日よりも上がっていればプラス、下がっていればマイナスになる
         log_return_data['{}_Close_RATE'.format(name)] = zscore(using_data[close_column]/using_data[close_column].shift())
@@ -151,7 +162,7 @@ def get_log_return_data(stocks, using_data):
         # 答を求める
         answers = []
         # 下がる／上がると判断する変化率
-        change_rate = 0.02
+        change_rate = up_rate
         for value in (using_data[close_column] / using_data[open_column]).values:
             if value < (1 - change_rate):
                 # 下がる
@@ -230,14 +241,17 @@ def iter_exchange_days_back(stocks, target_brand, max_days_back):
 def split_training_test_data(num_categories, training_test_data):
     '''学習データをトレーニング用とテスト用に分割する。
     '''
+
+    # 学習とテストに使用するデータ数を絞る
+    training_test_data = training_test_data[:TRAIN_MAX+TEST_COUNT]
+
     # 先頭のいくつかより後ろが学習データ
     predictors_tf = training_test_data[training_test_data.columns[num_categories:]]
     # 先頭のいくつかが答えデータ
     classes_tf = training_test_data[training_test_data.columns[:num_categories]]
 
     # 学習用とテスト用のデータサイズを求める
-    test_set_size = TEST_COUNT
-    training_set_size = len(training_test_data) - test_set_size
+    training_set_size = len(training_test_data) - TEST_COUNT
 
     return Dataset(
         training_predictors=predictors_tf[:training_set_size],
@@ -259,7 +273,6 @@ def smarter_network(stocks, dataset, layer1, layer2):
     actual_classes = tf.placeholder("float", [None, num_classes])
     keep_prob = tf.placeholder(tf.float32)
 
-    stddev = 1e-4
     layer_counts = [layer1, layer2, CLASS_COUNT]
     weights = []
     biases = []
@@ -267,9 +280,9 @@ def smarter_network(stocks, dataset, layer1, layer2):
     for i, count in enumerate(layer_counts):
         # 重み付けの変数定義
         if i == 0:
-            weights = tf.Variable(tf.truncated_normal([num_predictors, count], stddev=stddev))
+            weights = tf.Variable(tf.truncated_normal([num_predictors, count], stddev=STDDEV))
         else:
-            weights = tf.Variable(tf.truncated_normal([layer_counts[i - 1], count], stddev=stddev))
+            weights = tf.Variable(tf.truncated_normal([layer_counts[i - 1], count], stddev=STDDEV))
         # バイアスの変数定義
         biases = tf.Variable(tf.ones([count]))
 
@@ -287,7 +300,7 @@ def smarter_network(stocks, dataset, layer1, layer2):
 
     # 予測が正しいかを計算（学習に使用する）
     cost = -tf.reduce_sum(actual_classes*tf.log(model))
-    training_step = tf.train.AdamOptimizer(learning_rate=stddev).minimize(cost)
+    training_step = tf.train.AdamOptimizer(learning_rate=STDDEV).minimize(cost)
 
     # 変数の初期化処理
     init = tf.initialize_all_variables()
@@ -537,8 +550,8 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('target_brand')
-    parser.add_argument('--layer1', type=int, default=50)
-    parser.add_argument('--layer2', type=int, default=25)
+    parser.add_argument('--layer1', type=int, default=512)
+    parser.add_argument('--layer2', type=int, default=512)
     args = parser.parse_args()
 
     stocks = {
