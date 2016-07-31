@@ -22,8 +22,8 @@ from brands import nikkei225_s
 
 
 TEST_COUNT = 200        # テスト日数
-TRAIN_MIN = 800         # 学習データの最低日数
-TRAIN_MAX = 6000        # 学習データの最大日数
+TRAIN_MIN = 1000        # 学習データの最低日数
+TRAIN_MAX = None        # 学習データの最大日数
 DAYS_BACK = 3           # 過去何日分を計算に使用するか
 STEPS = 10000           # 学習回数
 CHECKIN_INTERVAL = 100  # 学習の途中結果を表示する間隔
@@ -32,6 +32,7 @@ PASS_DAYS = 10          # 除外する古いデータの日数
 DROP_RATE = 0.1         # 学習時のドロップアウトの比率
 UP_RATE = 0.07          # 上位何パーセントを買いと判断するか
 STDDEV = 1e-4           # 学習係数
+REMOVE_NEWEST_DAYS = 100 * 0    # 除外する最新のデータ日数
 
 CLASS_DOWN = 0
 CLASS_NEUTRAL = 1
@@ -242,8 +243,13 @@ def split_training_test_data(num_categories, training_test_data):
     '''学習データをトレーニング用とテスト用に分割する。
     '''
 
+    # 最新のデータを除外する
+    if REMOVE_NEWEST_DAYS:
+        training_test_data = training_test_data[:-REMOVE_NEWEST_DAYS]
+
     # 学習とテストに使用するデータ数を絞る
-    training_test_data = training_test_data[:TRAIN_MAX+TEST_COUNT]
+    if TRAIN_MAX:
+        training_test_data = training_test_data[:TRAIN_MAX+TEST_COUNT]
 
     # 先頭のいくつかより後ろが学習データ
     predictors_tf = training_test_data[training_test_data.columns[num_categories:]]
@@ -347,7 +353,13 @@ def train(env, target_prices):
             true_rate = 0.
             if true_count:
                 true_rate = float(trues[CLASS_UP]) / float(true_count)
-            print(i, '{:,d}円 {:.3f} {:.3f}'.format(money, true_rate, train_accuracy))
+
+            # テストデータの開始と終了の日付を取得
+            test_dates = env.dataset.test_predictors.index
+            test_from_date = test_dates[0]
+            test_to_date = test_dates[-1]
+
+            print(i, '{:,d}円 {:.3f} {:.3f} {}-{}'.format(money, true_rate, train_accuracy, test_from_date, test_to_date))
             if max_train_accuracy < train_accuracy:
                 max_train_accuracy = train_accuracy
                 bestScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
@@ -567,4 +579,5 @@ if __name__ == '__main__':
         # 対象の銘柄
         args.target_brand: Stock(YahooJp, args.target_brand, 1)
     }
+    print('REMOVE_NEWEST_DAYS {}'.format(REMOVE_NEWEST_DAYS))
     main(stocks, args.target_brand, args.layer1, args.layer2, result_file='results.csv')
