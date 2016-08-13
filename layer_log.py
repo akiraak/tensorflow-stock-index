@@ -20,7 +20,7 @@ class LayerLog(object):
 
     def is_code_full(self, code):
         logs = self.load_file()
-        if code in logs and len(logs[code]) == self.all_col_count:
+        if code in logs and len(logs[code]) >= self.all_col_count:
             return True
         return False
 
