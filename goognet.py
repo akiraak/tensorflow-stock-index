@@ -338,7 +338,7 @@ def train(env, target_prices):
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
     max_train_accuracy = 0
-    bestScore = None
+    lastScore = None
     for i in range(1, 1 + STEPS):
         env.sess.run(
             env.training_step,
@@ -363,11 +363,11 @@ def train(env, target_prices):
             print(i, '{:,d}円 {:.3f} {:.3f} {}-{}'.format(money, true_rate, train_accuracy, test_from_date, test_to_date))
             if max_train_accuracy < train_accuracy:
                 max_train_accuracy = train_accuracy
-                bestScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
             elif train_accuracy < 0.5:
                 break
+            lastScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
 
-    return bestScore
+    return lastScore
 
 
 # 売買シミュレーション
