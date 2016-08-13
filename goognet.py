@@ -33,7 +33,7 @@ PASS_DAYS = 10          # 除外する古いデータの日数
 DROP_RATE = 0.1         # 学習時のドロップアウトの比率
 UP_RATE = 0.07          # 上位何パーセントを買いと判断するか
 STDDEV = 1e-4           # 学習係数
-REMOVE_NEWEST_DAYS = 100 * 2    # 除外する最新のデータ日数
+REMOVE_NEWEST_DAYS = 200 * 1    # 除外する最新のデータ日数
 
 CLASS_LABELS = ['DOWN', 'NEUTRAL', 'UP']
 CLASS_DOWN = 0
