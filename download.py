@@ -52,14 +52,18 @@ class Download(object):
     def _upload_prices(self):
         return []
 
+    def load_csv(self):
+        with open(self.filePath) as f:
+            self.prices = [line.split(',') for line in f.read().split('\n')][1:]
     @property
     def dataframe(self):
         if len(self.prices) == 0:
-            with open(self.filePath) as f:
-                self.prices = [line.split(',') for line in f.read().split('\n')][1:]
+            self.load_csv()
         return pd.read_csv(self.filePath).set_index('Date').sort_index()
 
     def price(self, str_date):
+        if len(self.prices) == 0:
+            self.load_csv()
         for price in self.prices:
             if price[0] == str_date:
                 return price

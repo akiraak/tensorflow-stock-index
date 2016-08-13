@@ -19,11 +19,12 @@ from download import Download, YahooCom, YahooJp
 from brands import brand_name
 from layer_log import LayerLog
 from brands import nikkei225_s
+from feed_cache import FeedCache
 
 
 TEST_COUNT = 200        # テスト日数
-TRAIN_MIN = 800         # 学習データの最低日数
-TRAIN_MAX = 6000        # 学習データの最大日数
+TRAIN_MIN = 1000        # 学習データの最低日数
+TRAIN_MAX = None        # 学習データの最大日数
 DAYS_BACK = 3           # 過去何日分を計算に使用するか
 STEPS = 10000           # 学習回数
 CHECKIN_INTERVAL = 100  # 学習の途中結果を表示する間隔
@@ -32,12 +33,13 @@ PASS_DAYS = 10          # 除外する古いデータの日数
 DROP_RATE = 0.1         # 学習時のドロップアウトの比率
 UP_RATE = 0.07          # 上位何パーセントを買いと判断するか
 STDDEV = 1e-4           # 学習係数
+REMOVE_NEWEST_DAYS = 200 * 1    # 除外する最新のデータ日数
 
+CLASS_LABELS = ['DOWN', 'NEUTRAL', 'UP']
 CLASS_DOWN = 0
 CLASS_NEUTRAL = 1
 CLASS_UP = 2
-CLASS_COUNT = 3
-CLASS_LABELS = ['DOWN', 'NEUTRAL', 'UP']
+CLASS_COUNT = len(CLASS_LABELS)
 
 # 学習データに使用するパラメータのラベル
 PARAM_LABELS = ['Close', 'High', 'Low', 'Volume']
@@ -92,7 +94,7 @@ def load_exchange_dataframe(exchange):
     Returns:
         pd.DataFrame()
     '''
-    return pd.read_csv('index_{}.csv'.format(exchange)).set_index('Date').sort_index()
+    return pd.read_csv('index_{}.csv'.format(exchange), index_col='Date').sort_index()
 
 
 def get_using_data(dataframes, target_brand):
@@ -225,7 +227,7 @@ def build_training_data(stocks, log_return_data, target_brand, max_days_back=DAY
 
     # index（日付ラベル）を引き継ぐ
     training_test_data.index = log_return_data.index[max_days_back + PASS_DAYS: max_index]
-    return CLASS_COUNT, training_test_data
+    return training_test_data
 
 
 def iter_exchange_days_back(stocks, target_brand, max_days_back):
@@ -242,8 +244,13 @@ def split_training_test_data(num_categories, training_test_data):
     '''学習データをトレーニング用とテスト用に分割する。
     '''
 
+    # 最新のデータを除外する
+    if REMOVE_NEWEST_DAYS:
+        training_test_data = training_test_data[:-REMOVE_NEWEST_DAYS]
+
     # 学習とテストに使用するデータ数を絞る
-    training_test_data = training_test_data[:TRAIN_MAX+TEST_COUNT]
+    if TRAIN_MAX:
+        training_test_data = training_test_data[:TRAIN_MAX+TEST_COUNT]
 
     # 先頭のいくつかより後ろが学習データ
     predictors_tf = training_test_data[training_test_data.columns[num_categories:]]
@@ -331,7 +338,7 @@ def train(env, target_prices):
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
     max_train_accuracy = 0
-    bestScore = None
+    lastScore = None
     for i in range(1, 1 + STEPS):
         env.sess.run(
             env.training_step,
@@ -347,14 +354,20 @@ def train(env, target_prices):
             true_rate = 0.
             if true_count:
                 true_rate = float(trues[CLASS_UP]) / float(true_count)
-            print(i, '{:,d}円 {:.3f} {:.3f}'.format(money, true_rate, train_accuracy))
+
+            # テストデータの開始と終了の日付を取得
+            test_dates = env.dataset.test_predictors.index
+            test_from_date = test_dates[0]
+            test_to_date = test_dates[-1]
+
+            print(i, '{:,d}円 {:.3f} {:.3f} {}-{}'.format(money, true_rate, train_accuracy, test_from_date, test_to_date))
             if max_train_accuracy < train_accuracy:
                 max_train_accuracy = train_accuracy
-                bestScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
             elif train_accuracy < 0.5:
                 break
+            lastScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
 
-    return bestScore
+    return lastScore
 
 
 # 売買シミュレーション
@@ -457,19 +470,33 @@ def save_deal_logs(target_brand, deal_logs):
 
 
 def main(stocks, target_brand, layer1, layer2, result_file=None):
+    # 学習データのキャッシュ
+    feed_cache = FeedCache(target_brand, str(REMOVE_NEWEST_DAYS))
+
     # 対象の銘柄名
     target_brand_name = brand_name(target_brand)
-    # 株価指標データを読み込む
-    all_data  = load_exchange_dataframes(stocks, target_brand)
-    # 終値を取得
-    using_data = get_using_data(all_data, target_brand)
-    # データを学習に使える形式に正規化
-    log_return_data = get_log_return_data(stocks, using_data)
-    # 答と学習データを作る
-    num_categories, training_test_data = build_training_data(
-        stocks, log_return_data, target_brand)
+
+    if not feed_cache.is_exist():
+        print('Make cache')
+        # 株価指標データを読み込む
+        all_data  = load_exchange_dataframes(stocks, target_brand)
+
+        # 終値を取得
+        using_data = get_using_data(all_data, target_brand)
+
+        # データを学習に使える形式に正規化
+        log_return_data = get_log_return_data(stocks, using_data)
+
+        # 答と学習データを作る
+        training_test_data = build_training_data(
+            stocks, log_return_data, target_brand)
+        feed_cache.save(training_test_data)
+    else:
+        print('Exist cache')
+        training_test_data = feed_cache.load()
+
     # 学習データをトレーニング用とテスト用に分割する
-    dataset = split_training_test_data(num_categories, training_test_data)
+    dataset = split_training_test_data(CLASS_COUNT, training_test_data)
     if len(dataset.training_predictors) < TRAIN_MIN:
         print('[{}]{}: 学習データが少なすぎるため計算を中止'.format(target_brand, target_brand_name))
         with open('results.csv', 'a') as f:
@@ -489,6 +516,7 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
 
     # 器械学習のネットワークを作成
     env = smarter_network(stocks, dataset, layer1, layer2)
+
     # 学習
     train_accuracy, money, trues, falses, actual_count, deal_logs = train(env, stocks[target_brand])
 
@@ -567,4 +595,5 @@ if __name__ == '__main__':
         # 対象の銘柄
         args.target_brand: Stock(YahooJp, args.target_brand, 1)
     }
+    print('REMOVE_NEWEST_DAYS {}'.format(REMOVE_NEWEST_DAYS))
     main(stocks, args.target_brand, args.layer1, args.layer2, result_file='results.csv')
