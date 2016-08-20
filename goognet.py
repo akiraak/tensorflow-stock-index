@@ -9,6 +9,7 @@ import datetime
 import urllib2
 import math
 import os
+import shutil
 import operator as op
 from collections import namedtuple
 import numpy as np
@@ -33,7 +34,7 @@ PASS_DAYS = 10          # 除外する古いデータの日数
 DROP_RATE = 0.1         # 学習時のドロップアウトの比率
 UP_RATE = 0.07          # 上位何パーセントを買いと判断するか
 STDDEV = 1e-4           # 学習係数
-REMOVE_NEWEST_DAYS = 200 * 1    # 除外する最新のデータ日数
+REMOVE_NEWEST_DAYS = 200 * 0    # 除外する最新のデータ日数
 
 CLASS_LABELS = ['DOWN', 'NEUTRAL', 'UP']
 CLASS_DOWN = 0
@@ -60,7 +61,7 @@ class Stock(object):
 Dataset = namedtuple(
     'Dataset',
     'training_predictors training_classes test_predictors test_classes')
-Environ = namedtuple('Environ', 'sess model actual_classes training_step dataset feature_data keep_prob')
+Environ = namedtuple('Environ', 'sess model actual_classes training_step dataset feature_data keep_prob saver')
 
 
 def load_exchange_dataframes(stocks, target_brand):
@@ -309,6 +310,8 @@ def smarter_network(stocks, dataset, layer1, layer2):
     cost = -tf.reduce_sum(actual_classes*tf.log(model))
     training_step = tf.train.AdamOptimizer(learning_rate=STDDEV).minimize(cost)
 
+    saver = tf.train.Saver()
+
     # 変数の初期化処理
     init = tf.initialize_all_variables()
     sess.run(init)
@@ -321,53 +324,88 @@ def smarter_network(stocks, dataset, layer1, layer2):
         dataset=dataset,
         feature_data=feature_data,
         keep_prob=keep_prob,
+        saver=saver
     )
 
 
-def train(env, target_prices):
-    '''学習をsteps回おこなう。
-    '''
+def save_sess_dir_path(target_brand):
+    return os.path.join('sess_save', target_brand)
 
-    # 予測（model）と実際の値（actual）が一致（equal）した場合の配列を取得する
-    #   結果の例: [1,1,0,1,0] 1が正解
-    correct_prediction = tf.equal(
-        tf.argmax(env.model, 1),
-        tf.argmax(env.actual_classes, 1))
-    # 結果（例：[1,1,0,1,0] 1が正解）を float にキャストして
-    # 全ての平均（reduce_mean）を得る
-    accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
-    max_train_accuracy = 0
-    lastScore = None
-    for i in range(1, 1 + STEPS):
-        env.sess.run(
-            env.training_step,
-            feed_dict=feed_dict(env, test=False, keep_prob=(1.0 - DROP_RATE)),
-        )
-        if i % CHECKIN_INTERVAL == 0:
-            train_accuracy = env.sess.run(
-                accuracy,
-                feed_dict=feed_dict(env, test=False),
+def save_sess_file_path(target_brand):
+    return os.path.join(save_sess_dir_path(target_brand), 'sess.ckpt')
+
+
+def save_sess(saver, sess, target_brand):
+    dir_path = save_sess_dir_path(target_brand)
+    # 既存のファイル（保存ディレクトリ）あったら削除
+    if os.path.exists(dir_path):
+        shutil.rmtree(dir_path)
+    os.makedirs(dir_path)
+    file_path = save_sess_file_path(target_brand)
+    # 保存
+    saved_path = saver.save(sess, file_path)
+
+
+def restore_sess(saver, sess, target_brand):
+    file_path = save_sess_file_path(target_brand)
+    # 読み出し
+    saver.restore(sess, file_path)
+
+
+def train(load_sess, env, target_prices, target_brand):
+    if load_sess:
+        # 学習済みのファイルを読み込む
+        restore_sess(env.saver, env.sess, target_brand)
+        money, trues, falses, actual_count, deal_logs, up_expectation_dates = gamble(env, target_prices)
+        score = (0., money, trues, falses, actual_count, deal_logs, up_expectation_dates)
+        return score
+    else:
+        '''学習をsteps回おこなう。
+        '''
+
+        # 予測（model）と実際の値（actual）が一致（equal）した場合の配列を取得する
+        #   結果の例: [1,1,0,1,0] 1が正解
+        correct_prediction = tf.equal(
+            tf.argmax(env.model, 1),
+            tf.argmax(env.actual_classes, 1))
+        # 結果（例：[1,1,0,1,0] 1が正解）を float にキャストして
+        # 全ての平均（reduce_mean）を得る
+        accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
+
+        max_train_accuracy = 0
+        lastScore = None
+        for i in range(1, 1 + STEPS):
+            env.sess.run(
+                env.training_step,
+                feed_dict=feed_dict(env, test=False, keep_prob=(1.0 - DROP_RATE)),
             )
-            money, trues, falses, actual_count, deal_logs = gamble(env, target_prices)
-            true_count = trues[CLASS_UP] + falses[CLASS_UP]
-            true_rate = 0.
-            if true_count:
-                true_rate = float(trues[CLASS_UP]) / float(true_count)
+            if i % CHECKIN_INTERVAL == 0:
+                train_accuracy = env.sess.run(
+                    accuracy,
+                    feed_dict=feed_dict(env, test=False),
+                )
+                money, trues, falses, actual_count, deal_logs, up_expectation_dates = gamble(env, target_prices)
+                true_count = trues[CLASS_UP] + falses[CLASS_UP]
+                true_rate = 0.
+                if true_count:
+                    true_rate = float(trues[CLASS_UP]) / float(true_count)
 
-            # テストデータの開始と終了の日付を取得
-            test_dates = env.dataset.test_predictors.index
-            test_from_date = test_dates[0]
-            test_to_date = test_dates[-1]
+                # テストデータの開始と終了の日付を取得
+                test_dates = env.dataset.test_predictors.index
+                test_from_date = test_dates[0]
+                test_to_date = test_dates[-1]
 
-            print(i, '{:,d}円 {:.3f} {:.3f} {}-{}'.format(money, true_rate, train_accuracy, test_from_date, test_to_date))
-            if max_train_accuracy < train_accuracy:
-                max_train_accuracy = train_accuracy
-            elif train_accuracy < 0.5:
-                break
-            lastScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs)
+                print(i, '{:,d}円 {:.3f} {:.3f} {}-{}'.format(money, true_rate, train_accuracy, test_from_date, test_to_date))
+                if train_accuracy < 0.5:
+                    break
+                else:
+                    max_train_accuracy = train_accuracy
+                    # 学習済みのデータを保存
+                    save_sess(env.saver, env.sess, target_brand)
+                lastScore = (max_train_accuracy, money, trues, falses, actual_count, deal_logs, up_expectation_dates)
 
-    return lastScore
+        return lastScore
 
 
 # 売買シミュレーション
@@ -391,10 +429,13 @@ def gamble(env, target_prices):
     # 実際の結果
     actual_classes = getattr(env.dataset, 'test_classes')
 
+    up_expectation_dates = []
+
     # 結果の集計と売買シミュレーション
     for (i, date) in enumerate(env.dataset.test_predictors.index):
         expectation = expectations[i]
         if expectation == CLASS_UP:
+            up_expectation_dates.append(date)
             # 上がる予想なので買う
             price = target_prices.download.price(date)
             if price != None:
@@ -427,7 +468,7 @@ def gamble(env, target_prices):
         actual_count[actual] += 1
         deal_logs.append([date, CLASS_LABELS[expectation], CLASS_LABELS[actual], money])
 
-    return money, trues, falses, actual_count, deal_logs
+    return money, trues, falses, actual_count, deal_logs, up_expectation_dates
 
 
 def feed_dict(env, test=False, keep_prob=1.):
@@ -469,7 +510,24 @@ def save_deal_logs(target_brand, deal_logs):
         f.write('\n'.join([','.join([str(log) for log in logs])  for logs in deal_logs]))
 
 
-def main(stocks, target_brand, layer1, layer2, result_file=None):
+def save_up_expectation_dates(target_brand, up_expectation_dates):
+    file_path = 'up_expectation_dates.csv'
+    brand_dates = []
+
+    # 既存のファイルがあれば読み込む
+    if os.path.exists(file_path):
+        with open(file_path, 'r') as f:
+            brand_dates = [line.split(',') for line in f.read().split('\n')]
+    brand_dates.append([target_brand] + up_expectation_dates)
+
+    # 保存
+    with open(file_path, 'w') as f:
+        data = '\n'.join(','.join(brand) for brand in brand_dates)
+        f.write(data)
+        print('Saved: {}'.format(file_path))
+
+
+def main(stocks, target_brand, layer1, layer2, load_sess, result_file=None):
     # 学習データのキャッシュ
     feed_cache = FeedCache(target_brand, str(REMOVE_NEWEST_DAYS))
 
@@ -518,7 +576,7 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
     env = smarter_network(stocks, dataset, layer1, layer2)
 
     # 学習
-    train_accuracy, money, trues, falses, actual_count, deal_logs = train(env, stocks[target_brand])
+    train_accuracy, money, trues, falses, actual_count, deal_logs, up_expectation_dates = train(load_sess, env, stocks[target_brand], target_brand)
 
     print('-- テスト --')
     # 各クラスの正解率
@@ -533,6 +591,7 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
     print('下げ正解率    : {}% 予想{}回'.format(rates[CLASS_DOWN], counts[CLASS_DOWN]))
     print('変化なし正解率: {}% 予想{}回'.format(rates[CLASS_NEUTRAL], counts[CLASS_NEUTRAL]))
     print('上げ正解率    : {}% 予想{}回'.format(rates[CLASS_UP], counts[CLASS_UP]))
+    print('上げ予測日    : {}'.format(up_expectation_dates))
 
     print('-- 売買シミュレーション --')
     print('売買シミュレーション結果 {:,d}円'.format(money))
@@ -574,10 +633,14 @@ def main(stocks, target_brand, layer1, layer2, result_file=None):
         ]
     )
 
+    # 購入予想日を保存する
+    save_up_expectation_dates(target_brand, up_expectation_dates)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('target_brand')
+    parser.add_argument('--load_sess', type=int, default=0)
     parser.add_argument('--layer1', type=int, default=512)
     parser.add_argument('--layer2', type=int, default=512)
     args = parser.parse_args()
@@ -596,4 +659,4 @@ if __name__ == '__main__':
         args.target_brand: Stock(YahooJp, args.target_brand, 1)
     }
     print('REMOVE_NEWEST_DAYS {}'.format(REMOVE_NEWEST_DAYS))
-    main(stocks, args.target_brand, args.layer1, args.layer2, result_file='results.csv')
+    main(stocks, args.target_brand, args.layer1, args.layer2, args.load_sess, result_file='results.csv')
