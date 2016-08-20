@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-from nikkei225 import nikkei225, nikkei225_s
+from nikkei225 import (
+    nikkei225, nikkei225_s, nikkei225_excellent, nikkei225_excellent5,
+    nikkei225_excellent10, nikkei225_excellent20, nikkei225_excellent30
+)
 from tosho_1 import tosho_1
 from tosho_2 import tosho_2
 from tosho_jasdaq import tosho_jasdaq
